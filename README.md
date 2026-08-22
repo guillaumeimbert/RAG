@@ -1,6 +1,6 @@
 # RAGuessLighter
 
-Retrieval-Augmented Guess Lighter over **SEC EDGAR filings**, in OCaml.
+Retrieval-Augmented Guesslighter over **SEC EDGAR filings**, in OCaml.
 
 This is a pure vibe-coding proof of concept: built with Qwen 3.8 27B under
 almost no supervision, primarily to see how far the model can get on its
