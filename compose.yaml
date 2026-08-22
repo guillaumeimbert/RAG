@@ -11,14 +11,17 @@
 services:
   db:
     image: pgvector/pgvector:pg17
+    # Explicit name so it never collides with other local stacks
+    # (podman-compose otherwise derives "rag_db_1" from this directory name).
+    container_name: ragueshlighter-db
     environment:
-      POSTGRES_DB: edgarlighter
-      POSTGRES_USER: edgarlighter
-      POSTGRES_PASSWORD: edgarlighter
+      POSTGRES_DB: ragueshlighter
+      POSTGRES_USER: ragueshlighter
+      POSTGRES_PASSWORD: ragueshlighter
     ports:
       - "5432:5432"
     volumes:
-      - edgarlighter_pgdata:/var/lib/postgresql/data
+      - ragueshlighter_pgdata:/var/lib/postgresql/data
       - ./schema:/docker-entrypoint-initdb.d:ro,z  # :z = SELinux relabel (required under $HOME on Fedora)
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U edgarlighter -d edgarlighter"]
@@ -27,4 +30,4 @@ services:
       retries: 12
 
 volumes:
-  edgarlighter_pgdata:
+  ragueshlighter_pgdata:
