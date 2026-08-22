@@ -85,6 +85,19 @@ section, similarity); `ask` feeds the hits to the LLM with a grounded
 prompt and prints the answer with citations. Both accept `--cik`,
 `--form` and `--ticker` filters.
 
+### Ad-hoc SQL
+
+No `psql` client is needed on the host: run one in a throwaway container
+on the host network (it reaches the same `localhost:5432` the app uses):
+
+```sh
+podman run --rm --network host pgvector/pgvector:pg17 psql \
+  "postgresql://raguesslighter:raguesslighter@127.0.0.1:5432/raguesslighter" \
+  -c "SELECT company, form, count(*) FROM chunks GROUP BY 1, 2;"
+```
+
+(Adjust the credentials if your `compose.yaml` / `.env` differ.)
+
 ## Testing
 
 ```sh
