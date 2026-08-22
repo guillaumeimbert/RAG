@@ -1,6 +1,6 @@
 (** Small extraction helpers for [Yojson.Safe] values.
 
-    Yojson 3.x dropped the old [as_*] coercions, so ragueshlighter carries a
+    Yojson 3.x dropped the old [as_*] coercions, so raguesslighter carries a
     handful of strict, well-named replacements. Every helper raises
     {!Expecting} with the offending JSON on type mismatch, which keeps
     "the SEC API changed its response" failures loud and debuggable. *)

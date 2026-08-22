@@ -1,6 +1,6 @@
 (lang dune 3.20)
 
-(name ragueshlighter)
+(name raguesslighter)
 
 (generate_opam_files true)
 
@@ -14,7 +14,7 @@
 (documentation https://github.com/guillaumeimbert/raguesslighter)
 
 (package
- (name ragueshlighter)
+ (name raguesslighter)
  (synopsis "RAG over SEC EDGAR filings: OCaml + Postgres/pgvector + any OpenAI-compatible inference server")
  (description
   "Ingests SEC EDGAR filings through the official public APIs (daily-index

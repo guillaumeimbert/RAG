@@ -1,3 +1,3 @@
 (executables
  (names ingest query)
- (libraries ragueshlighter cmdliner lwt lwt.unix))
+ (libraries raguesslighter cmdliner lwt lwt.unix))

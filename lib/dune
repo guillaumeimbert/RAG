@@ -1,6 +1,6 @@
 (library
- (name ragueshlighter)
- (package ragueshlighter)
+ (name raguesslighter)
+ (package raguesslighter)
  (wrapped false)
  (libraries
   lwt

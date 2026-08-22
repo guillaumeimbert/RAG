@@ -1,4 +1,4 @@
-(** ragueshlighter-query: search or ask questions over ingested SEC filings.
+(** raguesslighter-query: search or ask questions over ingested SEC filings.
 
     Subcommands:
       search TEXT  vector search; prints the top hits with metadata;

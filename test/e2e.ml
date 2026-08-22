@@ -16,10 +16,10 @@
 
 let pg_host = "127.0.0.1"
 let pg_port = 5432
-let pg_user = "ragueshlighter"
-let pg_pass = "ragueshlighter"
-let pg_main_db = "ragueshlighter"
-let scratch_db = "ragueshlighter_e2e"
+let pg_user = "raguesslighter"
+let pg_pass = "raguesslighter"
+let pg_main_db = "raguesslighter"
+let scratch_db = "raguesslighter_e2e"
 let embed_dim = 8
 
 (* ------------------------------------------------------------------ *)
@@ -50,6 +50,14 @@ let pg_available () : bool =
 (* ------------------------------------------------------------------ *)
 
 let fixture name = Test_fixtures.read_text (Test_fixtures.fix name)
+
+(** Rewrite the single vector(N) column declaration in the schema to vector(dim). *)
+let rewrite_dim sql dim =
+  let start_i = String.index_of sql "vector(" in
+  let close_i = String.index_from sql start_i ')' in
+  String.sub sql 0 start_i
+  ^ Printf.sprintf "vector(%d)" dim
+  ^ String.sub sql (close_i + 1) (String.length sql - close_i - 1)
 
 (** Deterministic mock embedding: one 8-dim vector per input text. *)
 let mock_vector (s : string) : float list =
@@ -136,7 +144,7 @@ let () =
       pg_exec pg_main_db ("CREATE DATABASE " ^ scratch_db ^ ";");
       let schema =
         Test_fixtures.read_text (Test_fixtures.schema_file "0001_init.sql")
-        |> Stringx.replace ~sub:"vector(768)" ~by:(Printf.sprintf "vector(%d)" embed_dim)
+        |> rewrite_dim embed_dim
       in
       pg_exec scratch_db schema;
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;

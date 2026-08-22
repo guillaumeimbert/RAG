@@ -1,6 +1,6 @@
 (** Minimal HTTP client on cohttp-lwt-unix.
 
-    ragueshlighter only ever GETs (SEC EDGAR) and POSTs JSON (OpenAI-compatible
+    raguesslighter only ever GETs (SEC EDGAR) and POSTs JSON (OpenAI-compatible
     inference servers). This module centralises the two things both need:
     retries with exponential backoff on 429/5xx, and a client-side
     rate limiter so we stay under SEC's fair-access ceiling of

@@ -1,4 +1,4 @@
-# ragueshlighter
+# raguesslighter
 
 Retrieval-augmented generation over **SEC EDGAR filings**, in OCaml.
 
@@ -102,7 +102,7 @@ dune runtest
   pipeline runs against them — ticker → CIK → submissions → filing index
   → document → chunks → embeddings → store — plus idempotency, search
   with metadata filters and stats. The e2e test creates and destroys a
-  scratch database `ragueshlighter_e2e` (the main one is left untouched),
+  scratch database `raguesslighter_e2e` (the main one is left untouched),
   so Postgres must be reachable at `DATABASE_URL`.
 
 ## Project layout

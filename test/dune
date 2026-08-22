@@ -6,7 +6,7 @@
   lwt
   lwt.unix
   postgresql
-  ragueshlighter
+  raguesslighter
   re
   str
   threads

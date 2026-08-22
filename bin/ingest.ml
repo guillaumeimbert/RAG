@@ -1,4 +1,4 @@
-(** ragueshlighter-ingest: pull SEC EDGAR filings into the vector store.
+(** raguesslighter-ingest: pull SEC EDGAR filings into the vector store.
 
     Subcommands:
       day DATE       one business day (discovery via daily-index sitemaps)
