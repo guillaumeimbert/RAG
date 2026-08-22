@@ -4,7 +4,7 @@ Retrieval-Augmented Guess Lighter over **SEC EDGAR filings**, in OCaml.
 
 This is a pure vibe-coding proof of concept: built with Qwen 3.8 27B under
 almost no supervision, primarily to see how far the model can get on its
-own. It went further than expected.
+own. Will it go further than expected?
 
 Filings are ingested through the official public EDGAR APIs (no key, fair
 access policy), chunked and embedded through any **OpenAI-compatible**
