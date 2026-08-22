@@ -1,4 +1,4 @@
-# raguesslighter
+# RAGuessLighter
 
 Retrieval-augmented generation over **SEC EDGAR filings**, in OCaml.
 
