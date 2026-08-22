@@ -1,0 +1,30 @@
+# Local dev database: Postgres 17 + pgvector for the RAG.
+#
+#   podman compose up -d        # start (first run pulls the image, ~100 MB)
+#   podman compose down         # stop (volume keeps data)
+#   podman compose down -v      # stop AND destroy data
+#
+# NOTE: schema/*.sql runs automatically ONLY on first initialization
+# (empty data volume). After that, apply changes with psql or a migration
+# tool:  podman compose exec db psql -U edgarlighter -d edgarlighter
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: edgarlighter
+      POSTGRES_USER: edgarlighter
+      POSTGRES_PASSWORD: edgarlighter
+    ports:
+      - "5432:5432"
+    volumes:
+      - edgarlighter_pgdata:/var/lib/postgresql/data
+      - ./schema:/docker-entrypoint-initdb.d:ro,z  # :z = SELinux relabel (required under $HOME on Fedora)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U edgarlighter -d edgarlighter"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  edgarlighter_pgdata:
