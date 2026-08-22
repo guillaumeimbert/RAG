@@ -135,3 +135,8 @@ let load ?(env_file = ".env") () : t =
     chunk_overlap = E.require_int e "CHUNK_OVERLAP";
     top_k = E.require_int e "TOP_K";
   }
+
+(** True when [form] should be ingested: when it is in [FORMS], or when
+    [FORMS] contains the special value ["ALL"] (ingest every form). *)
+let forms_allow (t : t) (form : string) : bool =
+  List.mem "ALL" t.forms || List.mem form t.forms

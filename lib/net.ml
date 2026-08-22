@@ -82,7 +82,11 @@ let request ?throttle ?retries ~headers ?(body = None) meth url :
     string Lwt.t =
   let retries = Option.value ~default:5 retries in
   let rec go attempt =
-    let call =
+    (* The request must be a *thunk*: building the [Client.call] promise
+       would start the request immediately, before [Throttle.run] sleeps,
+       so the rate limiter would only work by accident (sequential code
+       paths). *)
+    let call () =
       Cohttp_lwt_unix.Client.call
         ~headers
         ?body:
@@ -94,8 +98,8 @@ let request ?throttle ?retries ~headers ?(body = None) meth url :
     in
     let task =
       match throttle with
-      | Some th -> Throttle.run th (fun () -> call)
-      | None -> call
+      | Some th -> Throttle.run th call
+      | None -> call ()
     in
     Lwt.bind task (fun (res, body) ->
       let code = Cohttp.Code.code_of_status (Cohttp.Response.status res) in

@@ -66,7 +66,7 @@ let ingest_job (store : Store.t) (job : job) : int Lwt.t =
   let cfg = store.Store.cfg in
   let index = job.index in
   let doc_id = index.accession in
-  if List.mem index.form cfg.Config.forms = false
+  if Config.forms_allow cfg index.form = false
   then Lwt.return 0
   else
     Lwt.bind (Store.doc_exists store doc_id) (fun exists ->
@@ -115,16 +115,21 @@ let ingest_day (store : Store.t) (day : Date.t) : stats Lwt.t =
     Lwt_list.iter_s
       (fun f ->
         Lwt.bind (Edgar.filing_index_of cfg f) (fun index ->
-          if List.mem index.form cfg.Config.forms
-          then
-            Lwt.bind (ingest_job store (make_job index)) (fun n ->
-              if n > 0
-              then (stats := { !stats with docs = !stats.docs + 1; chunks = !stats.chunks + n })
-              else stats := { !stats with skipped = !stats.skipped + 1 };
-              Lwt.return_unit)
-          else (
+          match index with
+          | (* index page without form metadata (letter/anonymous filing):
+               nothing to ingest *)
+            None ->
             stats := { !stats with skipped = !stats.skipped + 1 };
-            Lwt.return_unit)))
+            Lwt.return_unit
+          | Some index ->
+            if Config.forms_allow cfg index.form
+            then
+              Lwt.bind (ingest_job store (make_job index)) (fun n ->
+                if n > 0
+                then (stats := { !stats with docs = !stats.docs + 1; chunks = !stats.chunks + n })
+                else stats := { !stats with skipped = !stats.skipped + 1 };
+                Lwt.return_unit)
+            else (stats := { !stats with skipped = !stats.skipped + 1 }; Lwt.return_unit)))
       filings
     >>= fun () -> Lwt.return !stats)
 

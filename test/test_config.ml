@@ -83,4 +83,31 @@ let tests : (string * unit T.test_case list) list =
         T.test_case "require_csv trims and drops empties" `Quick (fun () ->
             T.check (T.list T.string) "mismatch" [ "b"; "c" ] (Config.E.require_csv [ ("A", " b , , c ") ] "A"));
       ] );
+    (
+      "forms_allow",
+      [
+        (* required_body has FORMS=10-K, 8-K ,, 10-Q *)
+        T.test_case "allow-listed form passes" `Quick (fun () ->
+            let p = write_env required_body in
+            let cfg = Config.load ~env_file:p () in
+            T.check T.bool "mismatch" true (Config.forms_allow cfg "10-K");
+            Sys.remove p);
+        T.test_case "non-allow-listed form is rejected" `Quick (fun () ->
+            let p = write_env required_body in
+            let cfg = Config.load ~env_file:p () in
+            T.check T.bool "mismatch" false (Config.forms_allow cfg "S-1");
+            Sys.remove p);
+        T.test_case "FORMS=ALL admits everything" `Quick (fun () ->
+            let p = write_env required_body in
+            let cfg = { (Config.load ~env_file:p ()) with Config.forms = [ "ALL" ] } in
+            T.check T.bool "mismatch" true (Config.forms_allow cfg "S-1");
+            T.check T.bool "mismatch" true (Config.forms_allow cfg "10-K");
+            T.check T.bool "mismatch" true (Config.forms_allow cfg "SC 13D");
+            Sys.remove p);
+        T.test_case "ALL among others admits everything" `Quick (fun () ->
+            let p = write_env required_body in
+            let cfg = { (Config.load ~env_file:p ()) with Config.forms = [ "10-K"; "ALL" ] } in
+            T.check T.bool "mismatch" true (Config.forms_allow cfg "S-1");
+            Sys.remove p);
+      ] );
   ]

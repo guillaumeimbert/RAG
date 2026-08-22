@@ -26,11 +26,13 @@ let tag_re = Re.compile (Re.Pcre.re "<[^>]*>")
 
 (** [noise_pair tag] matches an opening [<tag...>] (the character after the
     tag name must start attributes or close the tag, so e.g. [head] does not
-    match [header]) and everything up to the matching close tag. *)
+    match [header]) and everything up to the matching close tag. The first
+    alternative includes the closing [>] so that attributed tags are
+    consumed whole. *)
 let noise_pair tag =
   Re.compile
     (Re.Pcre.re ~flags:[`DOTALL]
-       (Printf.sprintf "<%s([ \t\n/][^>]*|>).*?</%s>" tag tag) )
+       (Printf.sprintf "<%s([ \t\n/][^>]*>|>).*?</%s>" tag tag) )
 
 let noise_res = List.map noise_pair [ "script"; "style"; "head"; "title"; "ix:header" ]
 
@@ -49,11 +51,13 @@ let mark_heading level s =
   let re =
     Re.compile
       (Re.Pcre.re ~flags:[`DOTALL]
-         (Printf.sprintf "<h%d([ \t\n/][^>]*|>)(.*?)</h%d>" level level) )
+         (Printf.sprintf "<h%d([ \t\n/][^>]*>|>)(.*?)</h%d>" level level) )
   in
   Re.replace re ~f:(fun g ->
-      (* group 1 is the post-tag-name part (attributes or ">"), group 2 the
-         heading text. *)
+      (* group 1 is the post-tag-name part (the attributes plus the closing
+         bracket, or just the bracket); group 2 is the heading text. The
+         bracket belongs to group 1 so that an attributed heading does not
+         leak a stray bracket character into the title. *)
       let inner = sanitize (Re.Group.get g 2) in
       if inner = ""
       then ""
@@ -66,10 +70,14 @@ let mark_headings s = List.fold_left (fun s level -> mark_heading level s) s [ 6
 (* Stage 3: block tags -> newlines                                      *)
 (* ------------------------------------------------------------------ *)
 
+(** Block-level open/close tags. The trailing alternative consumes the
+    whole tag head including its closing bracket ([>] is part of the match);
+    otherwise an attributed tag like [p class=...] would be replaced up to
+    before the bracket and litter the text with stray brackets. *)
 let block_tag_re =
   Re.compile
     (Re.Pcre.re
-       "</?(p|div|li|tr|td|th|table|thead|tbody|ul|ol|dl|dt|dd|br|hr|section|article|aside|header|footer|main|nav|blockquote|pre|figure|figcaption|center)([ \t\n/][^>]*|>)" )
+       "</?(p|div|li|tr|td|th|table|thead|tbody|ul|ol|dl|dt|dd|br|hr|section|article|aside|header|footer|main|nav|blockquote|pre|figure|figcaption|center)([ \t\n/][^>]*>|>)" )
 
 (* ------------------------------------------------------------------ *)
 (* Stage 5: entities                                                    *)
@@ -78,32 +86,44 @@ let block_tag_re =
 let entity_re =
   Re.compile (Re.Pcre.re "&(#x[0-9a-fA-F]+|#[0-9]+|[A-Za-z]+);")
 
+(* Code points via [\u{...}] escapes: unambiguous, unlike [\ddd] (decimal
+    byte) escapes, which made this table a breeding ground for off-by-one
+    UTF-8 errors. *)
 let named_entities : (string * string) list =
   [ ("amp", "&")
   ; ("lt", "<")
   ; ("gt", ">")
-  ; ("quot", "\"")
+  ; ("quot", "\u{0022}")
   ; ("apos", "'")
-  ; ("nbsp", " ")
-  ; ("ndash", "\226\128\147")  (* U+2013 *)
-  ; ("mdash", "\226\128\148")  (* U+2014 *)
-  ; ("hellip", "\226\128\146")  (* U+2026 *)
-  ; ("lsquo", "\226\128\150")  (* U+2018 *)
-  ; ("rsquo", "\226\128\151")  (* U+2019 *)
-  ; ("ldquo", "\226\128\154")  (* U+201C *)
-  ; ("rdquo", "\226\128\155")  (* U+201D *)
-  ; ("copy", "\194\145")  (* U+00A9 *)
-  ; ("reg", "\194\174")  (* U+00AE *)
-  ; ("trade", "\226\134\162")  (* U+2122 *)
-  ; ("aacute", "\194\161")
-  ; ("agrave", "\194\160")
-  ; ("eacute", "\194\169")
-  ; ("egrave", "\194\168")
-  ; ("iacute", "\194\173")
-  ; ("oacute", "\194\179")
-  ; ("uacute", "\194\185")
-  ; ("ccedil", "\194\170")
-  ; ("shy", "")
+  ; ("nbsp", "\u{00A0}")
+  ; ("ndash", "\u{2013}")
+  ; ("mdash", "\u{2014}")
+  ; ("hellip", "\u{2026}")
+  ; ("lsquo", "\u{2018}")
+  ; ("rsquo", "\u{2019}")
+  ; ("ldquo", "\u{201C}")
+  ; ("rdquo", "\u{201D}")
+  ; ("copy", "\u{00A9}")
+  ; ("reg", "\u{00AE}")
+  ; ("trade", "\u{2122}")
+  ; ("sect", "\u{00A7}")
+  ; ("para", "\u{00B6}")
+  ; ("deg", "\u{00B0}")
+  ; ("plusmn", "\u{00B1}")
+  ; ("pound", "\u{00A3}")
+  ; ("cent", "\u{00A2}")
+  ; ("euro", "\u{20AC}")
+  ; ("times", "\u{00D7}")
+  ; ("divide", "\u{00F7}")
+  ; ("aacute", "\u{00E1}")
+  ; ("agrave", "\u{00E0}")
+  ; ("eacute", "\u{00E9}")
+  ; ("egrave", "\u{00E8}")
+  ; ("iacute", "\u{00ED}")
+  ; ("oacute", "\u{00F3}")
+  ; ("uacute", "\u{00FA}")
+  ; ("ccedil", "\u{00E7}")
+  ; ("shy", "")  (* soft hyphen: drop, it is invisible *)
   ; ("zwnj", "")
   ]
 

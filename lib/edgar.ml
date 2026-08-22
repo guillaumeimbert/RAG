@@ -57,9 +57,12 @@ let listing_url cfg day =
   let ymd =
     Printf.sprintf "%04d%02d%02d" day.Date.year day.Date.month day.Date.day
   in
+  let year = Printf.sprintf "%04d" day.Date.year in
   let q = Date.quarter day in
+  (* Layout (verified live 2026-08-22): daily-index/{YYYY}/QTR{q}/sitemap.{YYYYMMDD}.xml.
+     The date-first form returns 403. *)
   cfg.Config.sec_daily_index_base
-  ^ "/" ^ ymd ^ "/QTR" ^ string_of_int q ^ "/sitemap." ^ ymd ^ ".xml"
+  ^ "/" ^ year ^ "/QTR" ^ string_of_int q ^ "/sitemap." ^ ymd ^ ".xml"
 
 let https base =
   if Stringx.starts_with base ~prefix:"http://"
@@ -187,12 +190,15 @@ let parse_index (filing : filing) (html : string) : filing_index option =
   match (form, filed_at_s, company_s) with
   | Some form, Some filed_at_s, Some company_s ->
     let filed_at =
+      (* [Stdlib.Failure]: this module declares its own [Failure], which
+         would otherwise shadow the stdlib exception raised by
+         [Date.of_string] (and then never be caught). *)
       (try Some (Date.of_string filed_at_s)
-       with Failure _ -> None)
+       with Stdlib.Failure _ -> None)
     in
     let report_date =
       Option.bind (get period_of_report_re)
-        (fun s -> (try Some (Date.of_string s) with Failure _ -> None))
+        (fun s -> (try Some (Date.of_string s) with Stdlib.Failure _ -> None))
     in
     (* primary document = the row of the first table whose Type equals the
        form; its Document cell links the .htm file. *)
@@ -238,15 +244,11 @@ let parse_index (filing : filing) (html : string) : filing_index option =
     result
   | _ -> None
 
-(** Fetch + parse the index page of [filing]. *)
-let filing_index_of cfg (filing : filing) : filing_index Lwt.t =
-  Lwt.bind (sec_get cfg filing.index_url) (fun html ->
-    match parse_index filing html with
-    | Some fi -> Lwt.return fi
-    | None ->
-      Lwt.fail
-        (Failure
-           ("unparseable index page: " ^ filing.accession ^ " " ^ filing.index_url)))
+(** Fetch + parse the index page of [filing]. [None] for pages with no form
+    metadata (letter/anonymous filings: no form, no HTML documents) — there
+    is nothing to ingest for those. *)
+let filing_index_of cfg (filing : filing) : filing_index option Lwt.t =
+  Lwt.map (parse_index filing) (sec_get cfg filing.index_url)
 
 (** Fetch a static document (filing HTML) from the EDGAR archives, under
     the shared throttle. *)

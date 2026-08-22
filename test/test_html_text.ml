@@ -38,10 +38,67 @@ let tests : (string * unit T.test_case list) list =
             T.check (T.list (T.pair T.string T.string)) "mismatch" [ ("", "Keep me\nrest") ] (blocks_of "<body><header>Keep me</header><p>rest</p></body>"));
       ] );
     (
+      "attributed tags",
+      [
+        T.test_case "attributed block tags leave no stray >" `Quick (fun () ->
+            T.check (T.list (T.pair T.string T.string)) "mismatch" [ ("", "one\ntwo") ] (blocks_of "<body><p class=\"a\">one</p><div id=\"x\">two</div></body>"));
+        T.test_case "attributed headings keep clean section titles" `Quick (fun () ->
+            T.check (T.list (T.pair T.string T.string)) "mismatch" [ ("", "preamble"); ("Beta", "body") ] (blocks_of "<body><p>preamble</p><h2 class=\"c\">Beta</h2><p>body</p></body>"));
+        T.test_case "attributed noise blocks are dropped whole" `Quick (fun () ->
+            T.check (T.list (T.pair T.string T.string)) "mismatch" [ ("H", "ok") ] (blocks_of "<body><script type=\"text/javascript\">var x = 1;</script><h1>H</h1><p>ok</p></body>"));
+      ] );
+    (
       "entities",
       [
-        T.test_case "named and numeric entities decode" `Quick (fun () ->
-            T.check T.string "mismatch" ("A & B \"C\" " ^ en_dash ^ " D \226\128\148 E F") (snd (List.hd (blocks_of "<body><p>A &amp; B &quot;C&quot; &#x2013; D &mdash; E &nbsp; F</p></body>"))));
+        T.test_case "the whole named table decodes to the right code points" `Quick (fun () ->
+            (* every entry asserted exactly — the table was written with
+               decimal byte escapes and 8+ entries were silently wrong; the
+               [\u{...}] escapes in the table make this test independent of
+               that pitfall *)
+            let cases =
+              [ ("amp", "&")
+              ; ("lt", "<")
+              ; ("gt", ">")
+              ; ("quot", "\u{0022}")
+              ; ("apos", "'")
+              ; ("nbsp", "\u{00A0}")
+              ; ("ndash", "\u{2013}")
+              ; ("mdash", "\u{2014}")
+              ; ("hellip", "\u{2026}")
+              ; ("lsquo", "\u{2018}")
+              ; ("rsquo", "\u{2019}")
+              ; ("ldquo", "\u{201C}")
+              ; ("rdquo", "\u{201D}")
+              ; ("copy", "\u{00A9}")
+              ; ("reg", "\u{00AE}")
+              ; ("trade", "\u{2122}")
+              ; ("sect", "\u{00A7}")
+              ; ("para", "\u{00B6}")
+              ; ("deg", "\u{00B0}")
+              ; ("plusmn", "\u{00B1}")
+              ; ("pound", "\u{00A3}")
+              ; ("cent", "\u{00A2}")
+              ; ("euro", "\u{20AC}")
+              ; ("times", "\u{00D7}")
+              ; ("divide", "\u{00F7}")
+              ; ("aacute", "\u{00E1}")
+              ; ("agrave", "\u{00E0}")
+              ; ("eacute", "\u{00E9}")
+              ; ("egrave", "\u{00E8}")
+              ; ("iacute", "\u{00ED}")
+              ; ("oacute", "\u{00F3}")
+              ; ("uacute", "\u{00FA}")
+              ; ("ccedil", "\u{00E7}")
+              ; ("shy", "")
+              ; ("zwnj", "") ] in
+            List.iter
+              (fun (name, expected) ->
+                T.check T.string (name ^ " decoded wrong") expected (Html_text.decode_entities ("&" ^ name ^ ";")))
+              cases);
+        T.test_case "named and numeric entities decode end to end" `Quick (fun () ->
+            T.check T.string "mismatch"
+              ("A & B \"C\" " ^ en_dash ^ " D \u{2014} E \u{00A0} F")
+              (snd (List.hd (blocks_of "<body><p>A &amp; B &quot;C&quot; &#x2013; D &mdash; E &nbsp; F</p></body>"))));
         T.test_case "unknown entities are kept" `Quick (fun () ->
             T.check T.string "mismatch" "x &zzz; y" (snd (List.hd (blocks_of "<body><p>x &zzz; y</p></body>"))));
       ] );
@@ -64,6 +121,9 @@ let tests : (string * unit T.test_case list) list =
             T.check T.bool "mismatch" true (Tcheck.contains all "NVIDIA");
             (* no markup or section markers leak through *)
             T.check T.bool "mismatch" true (List.for_all (fun (_, t) -> not (String.contains t '<')) bs);
+            (* the fixture is real iXBRL and full of <div style=...>/<div id=...>:
+               a regression of the tag idiom would litter the text with stray > *)
+            T.check T.bool "no stray >" true (List.for_all (fun (_, t) -> not (String.contains t '>')) bs);
             T.check T.bool "mismatch" true (List.for_all (fun (s, t) -> (not (String.contains s (Char.chr 31)))
                  && (not (String.contains s (Char.chr 30))) && String.length t > 0)
                  bs));

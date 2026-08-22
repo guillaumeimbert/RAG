@@ -27,7 +27,9 @@ let env_arg () =
 
 let top_k_arg () =
   Arg.value
-    (Arg.opt Arg.int 8 (Arg.info ["k"; "top-k"] ~docv:"N" ~doc:"Number of hits (default 8)."))
+    (Arg.opt (Arg.some' Arg.int) None
+       (Arg.info ["k"; "top-k"] ~docv:"N"
+          ~doc:"Number of hits (default: TOP_K from .env)."))
 
 let cik_arg () =
   Arg.value
@@ -80,7 +82,7 @@ let search_cmd =
     in
     run_query ~env_file:e (fun cfg store ->
         Lwt.bind (embed_query cfg text) (fun q ->
-          Lwt.bind (Store.search store ~query:q ~top_k:k ~cik:cik ~form:form ~ticker:ticker ()) (fun hits ->
+          Lwt.bind (Store.search store ~query:q ~top_k:(Option.value ~default:cfg.Config.top_k k) ~cik:cik ~form:form ~ticker:ticker ()) (fun hits ->
             if hits = []
             then Printf.printf "no results\n"
             else
@@ -124,7 +126,7 @@ let ask_cmd =
     in
     run_query ~env_file:e (fun cfg store ->
         Lwt.bind (embed_query cfg text) (fun q ->
-          Lwt.bind (Store.search store ~query:q ~top_k:k ~cik:cik ~form:form ~ticker:ticker ()) (fun hits ->
+          Lwt.bind (Store.search store ~query:q ~top_k:(Option.value ~default:cfg.Config.top_k k) ~cik:cik ~form:form ~ticker:ticker ()) (fun hits ->
             if hits = []
             then (
               Printf.printf "no results\n";

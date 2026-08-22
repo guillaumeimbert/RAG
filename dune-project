@@ -37,6 +37,7 @@
   cohttp
   cohttp-lwt
   cohttp-lwt-unix
+  lwt_ssl
   http
   lwt
   lwt_ppx

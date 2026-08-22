@@ -7,24 +7,52 @@ let tests : (string * unit T.test_case list) list =
     (
       "parse_sitemap",
       [
-        T.test_case "fixture pins the format" `Quick (fun () ->
-            (* fixture: 5 <loc> entries — one https, one duplicate, one that is a
-               document URL (no -index.htm) and must be ignored *)
-            let fs = Gz.gunzip (F.read_bin (F.fix "sitemap.xml.gz")) |> Edgar.parse_sitemap in
-            T.check T.int "mismatch" 3 (List.length fs);
+        T.test_case "real capture pins the live format" `Quick (fun () ->
+            (* Real capture of the first 12 entries of
+               /Archives/edgar/daily-index/2026/QTR3/sitemap.20260821.xml
+               (verified live 2026-08-22). Short-form <loc> URLs (dashed
+               accession directly under the unpadded CIK directory),
+               http:// (upgraded to https). The endpoint serves identity by
+               default and gzip when requested (Accept-Encoding: gzip); the
+               .gz fixture is the same capture gzipped, so both encodings
+               are pinned. *)
+            let fs = F.read_text (F.fix "sitemap.xml") |> Edgar.parse_sitemap in
+            T.check T.int "mismatch" 12 (List.length fs);
             T.check (T.list (T.pair T.string T.string)) "mismatch" [
-                ("0001045810-26-000021", "1045810");
-                ("0000320193-25-000079", "320193");
-                ("0000804328-25-000114", "804328");
+                ("0000000000-24-008189", "2019042");
+                ("0000000000-24-013440", "2019042");
+                ("0000000000-25-000133", "2019042");
+                ("0000000000-25-002933", "2019042");
+                ("0000000000-25-003640", "2019042");
+                ("0000000000-25-004448", "1083743");
+                ("0000000000-25-005511", "2054947");
+                ("0000000000-25-005601", "2065601");
+                ("0000000000-25-006098", "2044725");
+                ("0000000000-25-006155", "2067767");
+                ("0000000000-25-006220", "2054947");
+                ("0000000000-25-006459", "2063022");
               ] (List.map (fun (f : Edgar.filing) -> (f.accession, f.cik)) fs);
-            T.check (T.list T.string) "mismatch" [
-                "https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000021-index.htm";
-                "https://www.sec.gov/Archives/edgar/data/320193/0000320193-25-000079-index.htm";
-                "https://www.sec.gov/Archives/edgar/data/804328/0000804328-25-000114-index.htm";
-              ] (List.map (fun (f : Edgar.filing) -> f.index_url) fs);
             (* http:// entries were upgraded to https:// *)
             T.check T.bool "https urls" true (List.for_all (fun u -> String.starts_with u ~prefix:"https://")
-                       (List.map (fun (f : Edgar.filing) -> f.index_url) fs)));
+                       (List.map (fun (f : Edgar.filing) -> f.index_url) fs));
+            T.check T.string "short-form index url"
+              "https://www.sec.gov/Archives/edgar/data/2019042/0000000000-24-008189-index.htm"
+              (List.hd (List.map (fun (f : Edgar.filing) -> f.index_url) fs)));
+        T.test_case "gzip-encoded capture parses identically" `Quick (fun () ->
+            let fs = Gz.gunzip (F.read_bin (F.fix "sitemap.xml.gz")) |> Edgar.parse_sitemap in
+            T.check T.int "mismatch" 12 (List.length fs);
+            T.check T.string "mismatch" "0000000000-24-008189"
+              (List.hd (List.map (fun (f : Edgar.filing) -> f.accession) fs)));
+        T.test_case "duplicates and non-index entries are skipped" `Quick (fun () ->
+            let xml =
+              "<urlset>"
+              ^ "<url><loc>https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000021-index.htm</loc></url>"
+              ^ "<url><loc>https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000021-index.htm</loc></url>"
+              ^ "<url><loc>https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm</loc></url>"
+              ^ "</urlset>" in
+            let fs = Edgar.parse_sitemap xml in
+            T.check (T.list T.string) "mismatch" ["0001045810-26-000021"]
+              (List.map (fun (f : Edgar.filing) -> f.accession) fs));
         T.test_case "empty document" `Quick (fun () ->
             T.check (T.list T.string) "mismatch" [] (Edgar.parse_sitemap "" |> List.map (fun (f : Edgar.filing) -> f.accession)) );
         T.test_case "no matching entries" `Quick (fun () ->
@@ -97,6 +125,14 @@ let tests : (string * unit T.test_case list) list =
             let filing =
               { Edgar.accession = "x"; cik = "1"; index_url = "http://x" } in
             T.check (T.option T.string) "mismatch" None (Edgar.parse_index filing "<html>nope</html>" |> Option.map (fun fi -> fi.Edgar.form)) );
+        T.test_case "letter/anonymous filing (no form metadata) -> None" `Quick (fun () ->
+            (* real capture of a CIK-0 letter filing: same index-page template
+               but no form section, no filing date, no HTML documents. A whole
+               day of sitemaps contains several of these; they must be skipped,
+               not fail the run. *)
+            let filing =
+              { Edgar.accession = "0000000000-24-008189"; cik = "2019042"; index_url = "http://x" } in
+            T.check (T.option T.string) "mismatch" None (Edgar.parse_index filing (F.read_text (F.fix "letter_filing_index.html")) |> Option.map (fun fi -> fi.Edgar.form)) );
       ] );
     (
       "primary_url",
@@ -123,9 +159,11 @@ let tests : (string * unit T.test_case list) list =
       [
         T.test_case "QTR3 in August" `Quick (fun () ->
             let cfg = F.cfg_for "http://sec" (fun c -> c) in
-            T.check T.string "mismatch" "http://sec/20250818/QTR3/sitemap.20250818.xml" (Edgar.listing_url cfg (Date.of_string "2025-08-18")));
+            (* verified live 2026-08-22: /daily-index/{YYYY}/QTR{q}/sitemap.{YYYYMMDD}.xml
+               (the date-first form returns 403) *)
+            T.check T.string "mismatch" "http://sec/2025/QTR3/sitemap.20250818.xml" (Edgar.listing_url cfg (Date.of_string "2025-08-18")));
         T.test_case "QTR1 in February" `Quick (fun () ->
             let cfg = F.cfg_for "http://sec" (fun c -> c) in
-            T.check T.string "mismatch" "http://sec/20250210/QTR1/sitemap.20250210.xml" (Edgar.listing_url cfg (Date.of_string "2025-02-10")));
+            T.check T.string "mismatch" "http://sec/2025/QTR1/sitemap.20250210.xml" (Edgar.listing_url cfg (Date.of_string "2025-02-10")));
       ] );
   ]

@@ -17,9 +17,26 @@ history for targeted ingest. Candidate sources, verified live 2026-08-22:
 | `efts.sec.gov/LATEST/search-index` | full-text search | 1 request/query | optional backfill filter |
 
 Notes:
-- Daily-index files use **calendar quarters** (QTR1 = Jan–Mar … QTR4 = Oct–Dec);
-  each `sitemap.YYYYMMDD.xml` is gzip-compressed despite the `.xml` extension
-  (content is XML).
+- Daily-index files use **calendar quarters** (QTR1 = Jan–Mar … QTR4 =
+  Oct–Dec); URL layout is `Archives/edgar/daily-index/{YYYY}/QTR{q}/
+  sitemap.{YYYYMMDD}.xml` (verified live 2026-08-22; the date-first form
+  returns 403). Served as `text/xml` identity by default, gzip only when
+  `Accept-Encoding: gzip` is requested (~30x: 1.08 MB → 35 KB). The client
+  requests gzip and decodes by magic bytes, so both encodings are handled and
+  pinned by fixtures (plain + gzip captures of the same content).
+- The `<loc>` entries use the short index-page form
+  `http://www.sec.gov/Archives/edgar/data/{cik}/{acc-dashed}-index.htm`
+  (unpadded CIK, `http://` — upgraded to `https`; verified live), not the
+  long form with an undashed-accession directory.
+- One sitemap lists the same accession under several CIK directories (e.g.
+  CIK-0 anonymous/letter filings appear under each related filer's CIK); the
+  2026-08-21 sitemap had 4,983 `<loc>` lines = 3,719 distinct accessions.
+  Deduping by accession is therefore correct and loses nothing.
+- Some index pages (letter/anonymous filings) have **no form metadata at
+  all** — no form section, no filing date, no HTML documents. `parse_index`
+  returns `None` for those and the pipeline skips the filing (verified live;
+  format pinned by `test/fixtures/letter_filing_index.html`). A day's ingest
+  must not die on one such filing.
 - The SEC's official API page
   (`/search-filings/edgar-application-programming-interfaces`) documents
   submissions + XBRL + bulk ZIPs but not the daily sitemaps (undocumented but
