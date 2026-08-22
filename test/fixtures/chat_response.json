@@ -1,0 +1,1 @@
+{"id": "chatcmpl-mock1", "object": "chat.completion", "created": 1721234567, "model": "mock-llm", "choices": [{"index": 0, "message": {"role": "assistant", "content": "Per the filings [1], revenue grew 129%."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}}

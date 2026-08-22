@@ -1,0 +1,23 @@
+(library
+ (name ragueshlighter)
+ (package ragueshlighter)
+ (wrapped false)
+ (libraries
+  lwt
+  lwt.unix
+  caqti
+  caqti-lwt
+  caqti-lwt.unix
+  caqti-driver-postgresql
+  ppx_rapper.runtime
+  ppx_rapper_lwt
+  cohttp
+  cohttp-lwt
+  cohttp-lwt-unix
+  http
+  uri
+  yojson
+  re
+  zlib)
+ (preprocess
+  (pps lwt_ppx ppx_rapper)))

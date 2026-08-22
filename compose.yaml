@@ -6,7 +6,7 @@
 #
 # NOTE: schema/*.sql runs automatically ONLY on first initialization
 # (empty data volume). After that, apply changes with psql or a migration
-# tool:  podman compose exec db psql -U edgarlighter -d edgarlighter
+# tool:  podman compose exec db psql -U ragueshlighter -d ragueshlighter
 
 services:
   db:
@@ -15,6 +15,9 @@ services:
     # (podman-compose otherwise derives "rag_db_1" from this directory name).
     container_name: ragueshlighter-db
     environment:
+      # NOTE: the existing volume was initialised with the "raguesh" spelling
+      # (a typo of "raguess"), so the env below matches the running stack.
+      # On a fresh volume these values would apply instead.
       POSTGRES_DB: ragueshlighter
       POSTGRES_USER: ragueshlighter
       POSTGRES_PASSWORD: ragueshlighter
@@ -24,7 +27,7 @@ services:
       - ragueshlighter_pgdata:/var/lib/postgresql/data
       - ./schema:/docker-entrypoint-initdb.d:ro,z  # :z = SELinux relabel (required under $HOME on Fedora)
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U edgarlighter -d edgarlighter"]
+      test: ["CMD-SHELL", "pg_isready -U ragueshlighter -d ragueshlighter"]
       interval: 5s
       timeout: 3s
       retries: 12

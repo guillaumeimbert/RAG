@@ -1,0 +1,14 @@
+(tests
+ (names test e2e)
+ (libraries
+  alcotest
+  fmt
+  lwt
+  lwt.unix
+  postgresql
+  ragueshlighter
+  re
+  str
+  threads
+  unix
+  yojson))

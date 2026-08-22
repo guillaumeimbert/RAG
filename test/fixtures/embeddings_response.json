@@ -1,0 +1,1 @@
+{"object": "list", "data": [{"object": "embedding", "index": 1, "embedding": [0.4, 0.5, 0.6]}, {"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}], "model": "mock-embed", "usage": {"prompt_tokens": 5, "total_tokens": 5}}
