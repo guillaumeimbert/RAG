@@ -36,7 +36,16 @@ type chunk_row = {
   embedding : string;
 }
 
-let upsert_q =
+(** Maximum chunks per bulk upsert (one round trip per batch). The batch is
+    sent as a single JSON array parameter and expanded server-side with
+    jsonb_array_elements, so the query stays static and prepared. *)
+let upsert_batch = 512
+
+(** Batch upsert: one round trip for the whole batch. Each element of the
+    JSON array is [doc_id, company, cik, ticker, form, filed_at, section,
+    chunk_index, text, embedding] (all strings; filed_at / chunk_index /
+    embedding are cast server-side). *)
+let upsert_many_q =
   [%rapper
     execute
     {sql|
@@ -44,17 +53,42 @@ let upsert_q =
         doc_id, company, cik, ticker, form, filed_at, section,
         chunk_index, text, embedding
       )
-      VALUES (
-        %string{doc_id}, %string{company}, %string{cik}, %string{ticker},
-        %string{form}, %string{filed_at}::date, %string{section},
-        %int{chunk_index}, %string{text}, %string{embedding}::vector
-      )
+      SELECT
+        jrow->>0, jrow->>1, jrow->>2, jrow->>3, jrow->>4,
+        (jrow->>5)::date, jrow->>6, (jrow->>7)::int, jrow->>8,
+        (jrow->>9)::vector
+      FROM jsonb_array_elements(%string{rows}::jsonb) AS jrow
       ON CONFLICT (doc_id, chunk_index) DO UPDATE SET
         text      = EXCLUDED.text,
         embedding = EXCLUDED.embedding,
         section   = EXCLUDED.section
     |sql}
     syntax_off]
+
+(** Encode a batch as the JSON array expected by [upsert_many_q]. Yojson
+    handles all the escaping (text frequently contains quotes, newlines and
+    Unicode). *)
+let rows_json (rows : chunk_row list) : string =
+  let row_json r =
+    `List
+      [
+        `String r.doc_id;
+        `String r.company;
+        `String r.cik;
+        `String r.ticker;
+        `String r.form;
+        `String r.filed_at;
+        `String r.section;
+        `String (string_of_int r.chunk_index);
+        `String r.text;
+        `String r.embedding;
+      ]
+  in
+  Yojson.Safe.to_string (`List (List.map row_json rows))
+
+(** pgvector text form of a vector: "[0.1, 0.2, ...]". *)
+let vector_to_string (v : float list) : string =
+  "[" ^ String.concat "," (List.map (fun f -> Printf.sprintf "%.6f" f) v) ^ "]"
 
 (** One retrieval hit, ordered by descending cosine similarity. *)
 type hit = {
@@ -129,33 +163,26 @@ let create (cfg : Config.t) : t Lwt.t =
 
 let close t : unit Lwt.t = close_pool t.pool
 
-(** pgvector text form of a vector: "[0.1, 0.2, ...]". *)
-let vector_to_string (v : float list) : string =
-  "[" ^ String.concat "," (List.map (fun f -> Printf.sprintf "%.6f" f) v) ^ "]"
-
 let upsert_chunks t (rows : chunk_row list) : unit Lwt.t =
-  Lwt_list.iter_s
-    (fun (row : chunk_row) ->
-      Lwt.bind
-        ( Caqti_lwt_unix.Pool.use
-            (fun conn ->
-              upsert_q
-                ~doc_id:row.doc_id
-                ~company:row.company
-                ~cik:row.cik
-                ~ticker:row.ticker
-                ~form:row.form
-                ~filed_at:row.filed_at
-                ~section:row.section
-                ~chunk_index:row.chunk_index
-                ~text:row.text
-                ~embedding:row.embedding
-                conn)
-            t.pool )
-        (function
-          | Ok () -> Lwt.return_unit
-          | Error e -> Lwt.fail (Db (Caqti_error.show e))))
-    rows
+  let rec split acc l =
+    if List.length l <= upsert_batch then List.rev (l :: acc)
+    else
+      let (h, tl) = (List.take upsert_batch l, List.drop upsert_batch l) in
+      split (h :: acc) tl
+  in
+  match split [] rows with
+  | [] -> Lwt.return_unit
+  | batches ->
+    Lwt_list.iter_s
+      (fun batch ->
+        Lwt.bind
+          ( Caqti_lwt_unix.Pool.use
+              (fun conn -> upsert_many_q ~rows:(rows_json batch) conn)
+              t.pool )
+          (function
+            | Ok () -> Lwt.return_unit
+            | Error e -> Lwt.fail (Db (Caqti_error.show e))))
+      batches
 
 (** Vector search with optional metadata filters (empty/None = no filter). *)
 let search t ~query ~top_k ?(cik : string option = None) ?(form : string option = None) ?(ticker : string option = None) () :

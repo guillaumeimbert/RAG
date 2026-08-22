@@ -8,16 +8,16 @@ let run (res : 'a Lwt.t) : 'a = Lwt_main.run res
 let headers () = Net.sec_headers ~user_agent:"test@example.com (test)" ()
 
 let with_mock (h : string -> string -> Mock.resp option) (f : string -> unit) : unit =
-  let (port, sock) = Mock.start h in
+  let (port, stop) = Mock.start h in
   let base = Printf.sprintf "http://127.0.0.1:%d" port in
   let res =
     (try
        f base;
        Ok ()
      with e ->
-       (Unix.close sock; raise e))
+       (stop (); raise e))
   in
-  Unix.close sock;
+  stop ();
   match res with
   | Ok () -> ()
   | Error e -> raise e

@@ -248,13 +248,13 @@ let () =
 
       (* cleanup *)
       Lwt_main.run (Store.close store);
-      Option.iter Unix.close !edgar_sock;
-      Option.iter Unix.close !openai_sock;
+      Option.iter (fun s -> s ()) !edgar_sock;
+      Option.iter (fun s -> s ()) !openai_sock;
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ scratch_db ^ ";");
       print_endline "e2e: PASS";
       exit 0
     with e ->
-      (Option.iter Unix.close !edgar_sock; Option.iter Unix.close !openai_sock);
+      (Option.iter (fun s -> s ()) !edgar_sock; Option.iter (fun s -> s ()) !openai_sock);
       (* leave the scratch database in place on failure for inspection;
          the next run drops it again *)
       Printf.eprintf "e2e: FAIL %s\n%!" (Printexc.to_string e);

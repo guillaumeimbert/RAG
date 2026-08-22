@@ -11,9 +11,13 @@ type resp = {
 }
 
 (** [start handler] binds a listener on 127.0.0.1 (random port) and serves
-    [handler path body] on a dedicated thread. Returns the port and the
-    listening socket (close it to stop the server). *)
-let start (handler : string -> string -> resp option) : int * Unix.file_descr =
+    [handler path body] on a dedicated thread. Returns the port and a stop
+    function. The stop function is synchronous: it returns only once the
+    handler thread has closed the listener itself, so the listener's fd
+    number cannot be recycled while a zombie thread still references it
+    (recycling while the thread is parked in [accept] would let a stale
+    handler answer requests meant for a newer server). *)
+let start (handler : string -> string -> resp option) : int * (unit -> unit) =
   let sock = Unix.(socket PF_INET SOCK_STREAM 0) in
   Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
   Unix.listen sock 8;
@@ -21,6 +25,9 @@ let start (handler : string -> string -> resp option) : int * Unix.file_descr =
     match Unix.getsockname sock with
     | Unix.ADDR_INET (_, p) -> p
     | _ -> failwith "unexpected socket address" in
+  (* shutdown pipe: main thread -> handler thread; ack pipe: back. *)
+  let (s_rfd, s_wfd) = Unix.pipe () in
+  let (a_rfd, a_wfd) = Unix.pipe () in
 
   let send_all fd s =
     let b = Bytes.of_string s in
@@ -127,25 +134,52 @@ let read_request c =
     send_all c resp_.body
   in
 
-  Thread.create (fun () ->
-      (* select with a timeout instead of a bare [Unix.accept]: the test
-         closes the listening socket from the main thread, and a thread
-         parked in [accept] would otherwise never wake up, keeping the
-         process alive forever (OCaml threads are non-daemon). Closing the
-         fd makes the next [select] raise [Unix_error], ending the loop. *)
-      try
-        while true do
-          let (readable, _, _) = Unix.select [ sock ] [] [] 0.2 in
-          if List.mem sock readable then
-            (let c, _ = Unix.accept sock in
-             (try
-                let (path, clen, pre) = read_request c in
-                let body = read_body c clen pre in
-                (match handler path body with
-                 | Some resp_ -> respond c resp_
-                 | None -> respond c { code = 404; content_type = "text/plain"; body = "not found" })
-               with _ -> ()) ;
-             Unix.close c)
-        done
-      with Unix.Unix_error _ -> ()) ()
-    |> fun _ -> (port, sock)
+  let _thread =
+    Thread.create (fun () ->
+        (* select with a timeout instead of a bare [Unix.accept]: shutdown
+           is signalled through [s_rfd] and the listener is closed from this
+           thread only, so a parked [accept] is never left on a closed/recycled
+           fd. *)
+        let shutdown = ref false in
+        try
+          while not !shutdown do
+            let (readable, _, _) = Unix.select [ sock; s_rfd ] [] [] 0.2 in
+            if List.mem s_rfd readable
+            then
+              ( (* shutdown: close the listener from this thread, then ack. *)
+                Unix.close sock;
+                Unix.close s_rfd;
+                let b = Bytes.create 1 in
+                Bytes.set b 0 'x';
+                ignore (Unix.write a_wfd b 0 1);
+                Unix.close a_wfd;
+                shutdown := true )
+            else if List.mem sock readable
+            then
+              (let c, _ = Unix.accept sock in
+               (try
+                  let (path, clen, pre) = read_request c in
+                  let body = read_body c clen pre in
+                  (match handler path body with
+                   | Some resp_ -> respond c resp_
+                   | None -> respond c { code = 404; content_type = "text/plain"; body = "not found" })
+                 with _ -> ()) ;
+               Unix.close c)
+          done
+        with Unix.Unix_error _ -> ()) ()
+  in
+  let stop () =
+    let b = Bytes.create 1 in
+    Bytes.set b 0 'x';
+    (try ignore (Unix.write s_wfd b 0 1) with Unix.Unix_error _ -> ());
+    Unix.close s_wfd;
+    (* wait for the ack so the thread is dead (and the fd closed) before we
+       return; give up after a generous timeout rather than hang forever if
+       the thread died abnormally. *)
+    let ab = Bytes.create 1 in
+    let (ready, _, _) = Unix.select [ a_rfd ] [] [] 5.0 in
+    if List.mem a_rfd ready then ignore (Unix.read a_rfd ab 0 1)
+    else ();
+    Unix.close a_rfd
+  in
+  (port, stop)

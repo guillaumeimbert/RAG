@@ -184,6 +184,13 @@ let drop_leading_zeros s =
     done;
     String.sub s !i (l - !i)
 
+(** One row of the padded submissions arrays, in field order.
+    (accession, form, filed_at, report_at, doc, description). *)
+type submissions_row =
+  ((((Yojson.Safe.t * Yojson.Safe.t) * (Yojson.Safe.t * Yojson.Safe.t))
+    * Yojson.Safe.t)
+   * Yojson.Safe.t)
+
 (** Build [job] records straight from a submissions JSON "recent" block
     (no index-page fetch). Filing dates that do not parse are dropped. *)
 let jobs_of_submissions (cfg : Config.t) (j : Yojson.Safe.t) : job list =
@@ -218,11 +225,28 @@ let jobs_of_submissions (cfg : Config.t) (j : Yojson.Safe.t) : job list =
   let report_ats = arr "reportDate" in
   let docs = arr "primaryDocument" in
   let descs = arr "primaryDocDescription" in
-  let pick l i = if i < List.length l then List.nth l i else `String "" in
-  List.mapi
-    (fun i acc ->
-      match (acc, pick forms i, pick filed_ats i, pick docs i) with
-      | `String accession, `String form, `String filed_s, `String doc
+  (* Pad each field array to the accession count and zip into rows: one
+     O(n) pass (the submissions arrays are mostly full; short ones are
+     the optional ones, missing values become ""). *)
+  let n = List.length accessions in
+  let pad (l : Yojson.Safe.t list) : Yojson.Safe.t list =
+    let m = List.length l in
+    if m >= n then l else l @ List.init (n - m) (fun _ -> `String "")
+  in
+  let rows : submissions_row list =
+    List.combine
+      (List.combine
+         (List.combine
+            (List.combine (pad accessions) (pad forms))
+            (List.combine (pad filed_ats) (pad report_ats)))
+         (pad docs))
+      (pad descs)
+  in
+  List.filter_map
+    (fun (r : submissions_row) ->
+      let ((((acc, form), (filed_s, report_s)), doc), desc) = r in
+      match (acc, form, filed_s, report_s, doc, desc) with
+      | `String accession, `String form, `String filed_s, _, `String doc, _
         when doc <> "" ->
         (try
            let index =
@@ -233,12 +257,11 @@ let jobs_of_submissions (cfg : Config.t) (j : Yojson.Safe.t) : job list =
                form;
                filed_at = Date.of_string filed_s;
                report_date =
-                 (match pick report_ats i with
+                 (match report_s with
                   | `String s when s <> "" -> Some (Date.of_string s)
                   | _ -> None);
                primary_document = doc;
-               primary_description =
-                 (match pick descs i with `String s -> s | _ -> "");
+               primary_description = (match desc with `String s -> s | _ -> "");
                index_url =
                  cfg.Config.sec_archives_base
                  ^ "/"
@@ -252,8 +275,7 @@ let jobs_of_submissions (cfg : Config.t) (j : Yojson.Safe.t) : job list =
            Some (make_job index)
          with Failure _ -> None)
       | _ -> None)
-    accessions
-  |> List.filter_map (fun x -> x)
+    rows
 
 (** Ingest the recent filings of one CIK. [?limit] bounds the number of
     filings (the most recent are first). *)
