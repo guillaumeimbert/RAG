@@ -5,13 +5,13 @@
 (generate_opam_files true)
 
 (source
- (github guillaumeimbert/RAG))
+ (github guillaumeimbert/raguesslighter))
 
 (authors "Guillaume Imbert <imbert.guillaume@gmail.com>")
 
 (maintainers "Guillaume Imbert <imbert.guillaume@gmail.com>")
 
-(documentation https://github.com/guillaumeimbert/RAG)
+(documentation https://github.com/guillaumeimbert/raguesslighter)
 
 (package
  (name ragueshlighter)
