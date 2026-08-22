@@ -1,4 +1,4 @@
-# RAGuessLighter
+# RAGuesslighter - Retrieval-Augmented Guesslighter
 
 Retrieval-Augmented Guesslighter over **SEC EDGAR filings**, in OCaml.
 
