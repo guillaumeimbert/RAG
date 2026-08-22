@@ -13,9 +13,9 @@ Ingests SEC EDGAR filings through the official public APIs (daily-index
 maintainer: ["Guillaume Imbert <imbert.guillaume@gmail.com>"]
 authors: ["Guillaume Imbert <imbert.guillaume@gmail.com>"]
 tags: ["rag" "edgar" "sec" "pgvector"]
-homepage: "https://github.com/guillaumeimbert/RAG"
-doc: "https://github.com/guillaumeimbert/RAG"
-bug-reports: "https://github.com/guillaumeimbert/RAG/issues"
+homepage: "https://github.com/guillaumeimbert/raguesslighter"
+doc: "https://github.com/guillaumeimbert/raguesslighter"
+bug-reports: "https://github.com/guillaumeimbert/raguesslighter/issues"
 depends: [
   "dune" {>= "3.20"}
   "ocaml" {= "5.5.0"}
@@ -54,5 +54,5 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/guillaumeimbert/RAG.git"
+dev-repo: "git+https://github.com/guillaumeimbert/raguesslighter.git"
 x-maintenance-intent: ["(latest)"]
