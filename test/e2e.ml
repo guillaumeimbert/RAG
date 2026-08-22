@@ -154,6 +154,8 @@ let () =
               scratch_db;
           openai_base_url = Printf.sprintf "http://127.0.0.1:%d/v1" openai_port;
           openai_api_key = "test-key";
+          openai_embed_base_url = Printf.sprintf "http://127.0.0.1:%d/v1" openai_port;
+          openai_embed_api_key = "test-key";
           llm_model = "mock-llm";
           embedding_model = "mock-embed";
           Config.embedding_dim = embed_dim;

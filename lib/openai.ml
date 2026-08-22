@@ -29,6 +29,9 @@ let role_string = function
 let headers cfg =
   Net.json_headers ~auth:(Some cfg.Config.openai_api_key) ()
 
+let headers_embed cfg =
+  Net.json_headers ~auth:(Some cfg.Config.openai_embed_api_key) ()
+
 let parse_json context s =
   match Yojson.Safe.from_string s with
   | j -> j
@@ -132,8 +135,8 @@ let embed ~cfg (texts : string list) : (float list) list Lwt.t =
     in
     Lwt.bind
       (Net.post_json
-         ~headers:(headers cfg)
-         (cfg.Config.openai_base_url ^ "/embeddings")
+         ~headers:(headers_embed cfg)
+         (cfg.Config.openai_embed_base_url ^ "/embeddings")
          ~body:(Yojson.Safe.to_string payload))
       (fun s ->
         let vecs =

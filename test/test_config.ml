@@ -45,6 +45,18 @@ let tests : (string * unit T.test_case list) list =
             let p = write_env (required_body ^ "SEC_COMPANY_TICKERS_URL=http://x/t.json\n") in
             T.check T.string "mismatch" "http://x/t.json" (Config.load ~env_file:p ()).Config.sec_company_tickers_url;
             Sys.remove p);
+        T.test_case "embedding endpoint defaults to the chat one" `Quick (fun () ->
+            let p = write_env required_body in
+            let cfg = Config.load ~env_file:p () in
+            T.check T.string "mismatch" cfg.Config.openai_base_url cfg.Config.openai_embed_base_url;
+            T.check T.string "mismatch" cfg.Config.openai_api_key cfg.Config.openai_embed_api_key;
+            Sys.remove p);
+        T.test_case "embedding endpoint overrides" `Quick (fun () ->
+            let p = write_env (required_body ^ "OPENAI_EMBED_BASE_URL=http://10.0.0.5:9999/v1/\nOPENAI_EMBED_API_KEY=embkey\n") in
+            let cfg = Config.load ~env_file:p () in
+            T.check T.string "mismatch" "http://10.0.0.5:9999/v1" cfg.Config.openai_embed_base_url;
+            T.check T.string "mismatch" "embkey" cfg.Config.openai_embed_api_key;
+            Sys.remove p);
         T.test_case "missing required var raises Missing" `Quick (fun () ->
             let body = Stringx.replace required_body ~sub:"TOP_K=5\n" ~by:"" in
             let p = write_env body in

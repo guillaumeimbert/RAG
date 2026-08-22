@@ -92,6 +92,11 @@ type t = {
   database_url : string;
   openai_base_url : string;
   openai_api_key : string;
+  (** Embedding endpoint (base URL + key). Defaults to the chat endpoint;
+      set [OPENAI_EMBED_BASE_URL] / [OPENAI_EMBED_API_KEY] when embeddings
+      are served by a different server. *)
+  openai_embed_base_url : string;
+  openai_embed_api_key : string;
   llm_model : string;
   embedding_model : string;
   embedding_dim : int;
@@ -113,10 +118,20 @@ type t = {
 
 let load ?(env_file = ".env") () : t =
   let e = E.of_file env_file in
+  let openai_base_url = Stringx.drop_suffix ~suffix:"/" (E.require e "OPENAI_BASE_URL") in
+  let openai_api_key = E.require e "OPENAI_API_KEY" in
   {
     database_url = E.require e "DATABASE_URL";
-    openai_base_url = Stringx.drop_suffix ~suffix:"/" (E.require e "OPENAI_BASE_URL");
-    openai_api_key = E.require e "OPENAI_API_KEY";
+    openai_base_url;
+    openai_api_key;
+    openai_embed_base_url =
+      (match E.get e "OPENAI_EMBED_BASE_URL" with
+       | Some u -> Stringx.drop_suffix ~suffix:"/" u
+       | None -> openai_base_url);
+    openai_embed_api_key =
+      (match E.get e "OPENAI_EMBED_API_KEY" with
+       | Some k -> k
+       | None -> openai_api_key);
     llm_model = E.require e "LLM_MODEL";
     embedding_model = E.require e "EMBEDDING_MODEL";
     embedding_dim = E.require_int e "EMBEDDING_DIM";

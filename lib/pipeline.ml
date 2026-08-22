@@ -255,11 +255,17 @@ let jobs_of_submissions (cfg : Config.t) (j : Yojson.Safe.t) : job list =
     accessions
   |> List.filter_map (fun x -> x)
 
-let ingest_cik (store : Store.t) (cik : string) : stats Lwt.t =
+(** Ingest the recent filings of one CIK. [?limit] bounds the number of
+    filings (the most recent are first). *)
+let ingest_cik ?limit (store : Store.t) (cik : string) : stats Lwt.t =
   let cfg = store.Store.cfg in
   let stats = ref { docs = 0; chunks = 0; skipped = 0 } in
   Lwt.bind (Edgar.submissions cfg cik) (fun j ->
-    let jobs = jobs_of_submissions cfg j in
+    let jobs =
+      (match limit with
+       | Some n -> List.take n (jobs_of_submissions cfg j)
+       | None -> jobs_of_submissions cfg j)
+    in
     Lwt_list.iter_s
       (fun job ->
         Lwt.bind (ingest_job store job) (fun n ->

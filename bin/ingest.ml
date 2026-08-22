@@ -105,13 +105,21 @@ let cik_cmd =
          (Arg.info [] ~docv:"CIK" ~doc:"Company CIK (e.g. 320193)."))
   in
   let env = env_arg () in
+  let limit =
+    Arg.value
+      (Arg.opt Arg.int 0
+         (Arg.info [ "l"; "limit" ] ~docv:"N"
+            ~doc:"Ingest at most the N most recent filings (default: all)."))
+  in
   let term =
     let open Term.Syntax in
     let+ c = cik
     and+ e = env
+    and+ l = limit
     in
     run_job ~env_file:e (fun store _cfg ->
-        Lwt.bind (Pipeline.ingest_cik store c) (fun s ->
+        let limit = if l > 0 then Some l else None in
+        Lwt.bind (Pipeline.ingest_cik ?limit store c) (fun s ->
           Printf.printf "CIK %s  %s\n" c (Pipeline.show_stats s);
           Lwt.return_unit))
   in
@@ -124,16 +132,24 @@ let ticker_cmd =
          (Arg.info [] ~docv:"TICKER" ~doc:"Ticker (e.g. AAPL)."))
   in
   let env = env_arg () in
+  let limit =
+    Arg.value
+      (Arg.opt Arg.int 0
+         (Arg.info [ "l"; "limit" ] ~docv:"N"
+            ~doc:"Ingest at most the N most recent filings (default: all)."))
+  in
   let term =
     let open Term.Syntax in
     let+ t = ticker
     and+ e = env
+    and+ l = limit
     in
     run_job ~env_file:e (fun store cfg ->
+        let limit = if l > 0 then Some l else None in
         Lwt.bind (Edgar.cik_of_ticker cfg t) (function
           | None -> raise (Edgar.Failure ("unknown ticker: " ^ t))
           | Some cik ->
-            Lwt.bind (Pipeline.ingest_cik store cik) (fun s ->
+            Lwt.bind (Pipeline.ingest_cik ?limit store cik) (fun s ->
               Printf.printf "%s (CIK %s)  %s\n" t cik (Pipeline.show_stats s);
               Lwt.return_unit)))
   in
