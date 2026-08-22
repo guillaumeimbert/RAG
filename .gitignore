@@ -1,0 +1,79 @@
+# ── Secrets & local config ────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+
+# ── Python (just in case it sneaks back in) ──────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ── C / C++ build artifacts ───────────────────────────────────────────
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+*.out
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.cache/
+clangd/
+
+# ── OCaml (dune) ──────────────────────────────────────────────────────
+_build/
+*.cmo
+*.cmx
+*.cmi
+*.cma
+*.cmxa
+*.cmxs
+*.byte
+*.native
+*.install
+merlin
+.dune/
+
+# ── Local data, DB dumps, model weights ──────────────────────────────
+# Source documents in data/docs/ stay committed; heavy/derived data does not.
+data/raw/
+data/processed/
+pgdata/
+*.dump
+*.sql.gz
+*.tar.gz
+models/
+*.gguf
+*.onnx
+*.safetensors
+*.faiss
+*.emb
+
+# ── Logs & temp ───────────────────────────────────────────────────────
+*.log
+logs/
+tmp/
+*.tmp
+*.swp
+*.swo
+
+# ── Editors & OS ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.iml
+*~
+.DS_Store
+Thumbs.db
