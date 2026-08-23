@@ -13,7 +13,13 @@ open Cmdliner
 let run_query ~env_file (f : Config.t -> Store.t -> unit Lwt.t) : (unit, string) result =
   (try
      let cfg = Config.load ~env_file () in
-     Lwt_main.run (Lwt.bind (Store.create cfg) (fun store -> Lwt.bind (f cfg store) (fun () -> Store.close store)));
+     Lwt_main.run
+       ( Lwt.bind (Store.create cfg) (fun store ->
+           (* [Lwt.finalize] drains the pool whether the command succeeds or
+              raises (an out-of-range --top-k, an inference failure, a DB
+              error, ...), so no failure path leaks the connection; the
+              command's exception (if any) is re-raised after the cleanup. *)
+           Lwt.finalize (fun () -> f cfg store) (fun () -> Store.close store) ));
      Ok ()
    with
    | Config.Missing k -> Error ("missing environment variable: " ^ k)
