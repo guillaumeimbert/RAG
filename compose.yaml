@@ -8,13 +8,12 @@
 # sole schema authority (it applies schema/*.sql AND records them in
 # schema_migrations). After `podman compose up -d`, run
 #   dune exec bin/migrate.exe -- up
-# to bring the database to the latest schema. For a database initialized
-# before the migration tracker existed (the older compose initdb path), run
-# the one-time
-#   dune exec bin/migrate.exe -- baseline
-# instead (it verifies the schema is present and records the files without
-# re-running them). After adoption, apply new migrations with `migrate up`
-# (see docs/how-to/database.md).
+# to bring the database to the latest schema. A database initialized before the
+# migration tracker existed (the older compose initdb path, schema present but
+# no records) is also brought up to date by `migrate up`: the migrations are
+# idempotent and corrective, so re-running them converges the schema to the
+# current definitions before the checksums are recorded (see
+# docs/how-to/database.md).
 
 services:
   db:

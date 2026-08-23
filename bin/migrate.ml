@@ -3,10 +3,12 @@
     Subcommands:
       up       apply the missing migrations (in order, transactionally, under
                an advisory lock);
-      status   report the applied and pending migrations (no changes);
-      baseline record the current migrations as applied without re-running
-               them (one-time transition for databases created before the
-               schema_migrations tracker existed, e.g. by compose initdb).
+      status   report the applied and pending migrations (no changes).
+
+    A database created before the schema_migrations tracker existed (schema
+    present, no records) is brought up to date by `up`: the migrations are
+    idempotent and corrective, so re-running them converges the schema to the
+    current definitions before the checksums are recorded.
 
     The numbered files under schema/ are immutable once applied: never edit
     one that has been recorded; add a new NNNN_<name>.sql instead.
@@ -50,19 +52,8 @@ let status_cmd =
   in
   Cmd.v (Cmd.info "status" ~doc:"Report the applied and pending migrations (no changes).") term
 
-let baseline_cmd =
-  let env = env_arg () in
-  let term =
-    let open Term.Syntax in
-    let+ e = env in run_migrate ~env_file:e (fun url -> Migration.baseline url)
-  in
-  Cmd.v
-    (Cmd.info "baseline"
-       ~doc:"Record the current migrations as applied without re-running them (one-time transition; verifies the schema is present).")
-    term
-
 let main =
-  Cmd.group (Cmd.info "migrate" ~doc:"Apply the schema migrations.") [ up_cmd; status_cmd; baseline_cmd ]
+  Cmd.group (Cmd.info "migrate" ~doc:"Apply the schema migrations.") [ up_cmd; status_cmd ]
 
 let () =
   let code = Cmd.eval_result main in

@@ -49,20 +49,16 @@ dune exec bin/migrate.exe -- up
 ```
 
 **Existing database (created before the tracker).** A database that already has
-the baseline schema (currently version 6, the version the fingerprint
-corresponds to) but no `schema_migrations` records (e.g. initialized by an older
+the schema but no `schema_migrations` records (e.g. initialized by an older
 version of `compose.yaml`, which used to apply the schema files via
-`docker-entrypoint-initdb.d` without leaving records) needs a one-time
-`baseline`. It verifies the schema is present (a clearly-scoped fingerprint of
-the public tables, key columns, the `chunks_text_nonempty` constraint, and the
-`chunks_embedding_hnsw` index) and records the files up to and including the
-baseline version as applied without re-running them; it refuses an empty or
-partially-initialized database, and any migration file beyond the baseline
-version (extend the fingerprint and bump `baseline_version` when a new migration
-is added). After that, `migrate up` applies only files added later:
+`docker-entrypoint-initdb.d` without leaving records) is brought up to date by
+`migrate up` — there is no separate "record without re-running" command. The
+migrations are idempotent and corrective (they guard each structural change),
+so re-running them on a database that already has the objects converges the
+schema to the current definitions before the checksums are recorded:
 
 ```sh
-dune exec bin/migrate.exe -- baseline   # one-time transition (verifies the schema)
+dune exec bin/migrate.exe -- up         # converges the schema + records the migrations
 dune exec bin/migrate.exe -- status     # verify: all applied, none pending
 ```
 
@@ -73,11 +69,7 @@ the latest schema by `migrate up` (see **Reset the database**).
 **Adding a migration.** Add a new `schema/NNNN_name.sql` file (the next
 number). Never edit an applied file — its checksum is recorded in
 `schema_migrations` and `migrate up` refuses to continue if a recorded file has
-changed (add a new file instead). Because `migrate baseline` is tied to a fixed
-`baseline_version` and a `verify_schema` fingerprint of that schema, also bump
-`baseline_version` and extend the fingerprint in `lib/migration.ml` when a new
-migration is added (so `baseline` can certify the new schema). Then run
-`migrate up` on each deployment:
+changed (add a new file instead). Then run `migrate up` on each deployment:
 
 ```sh
 dune exec bin/migrate.exe -- up
@@ -138,10 +130,6 @@ for i in $(seq 30); do
 done
 dune exec bin/migrate.exe -- up
 ```
-
-(For a database initialized before the migration tracker existed — the older
-compose initdb path — run the one-time `migrate baseline` instead, which
-verifies the schema is present and records the files without re-running them.)
 
 ## Change the embedding dimension
 

@@ -459,31 +459,28 @@ let () =
          | _ -> -1)
       in
       check "migration up (upgrade): 6 migrations recorded" (mig_count3 = 6);
-      (* (d) baseline against an empty database is refused *)
-      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
-      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
-      let baseline_empty = Lwt_main.run (Migration.baseline migrate_url) in
-      (match baseline_empty with
-      | Ok _ -> check "migration baseline (empty): refused" false
-      | Error e -> (check "migration baseline (empty): refused" true;
-                    check "migration baseline (empty): mentions refused" (contains e "refused")));
-      (* (e) baseline of a valid legacy schema records the files *)
+      (* (d) a legacy untracked database (schema present, no records) is
+         converged to the current schema and recorded by `up` (the migrations
+         are idempotent and corrective, so re-running is safe). *)
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
       pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
       let legacy = Lwt_main.run (Migration.snapshot_up_to migrate_url 7) in
       (match legacy with
-      | Error e -> (check "migration baseline (legacy): snapshot applied" false; Printf.eprintf "  snapshot: %s\n%!" e; exit 1)
-      | Ok _ -> check "migration baseline (legacy): snapshot applied" true);
+      | Error e -> (check "migration up (legacy): snapshot applied" false; Printf.eprintf "  snapshot: %s\n%!" e; exit 1)
+      | Ok _ -> check "migration up (legacy): snapshot applied" true);
       pg_exec migrate_db "DELETE FROM schema_migrations;";
-      let baseline_legacy = Lwt_main.run (Migration.baseline migrate_url) in
-      (match baseline_legacy with
-      | Ok _ -> check "migration baseline (legacy): recorded" true
-      | Error e -> (check "migration baseline (legacy): recorded" false; Printf.eprintf "  baseline: %s\n%!" e; exit 1));
-      let baseline_count =
+      let up_legacy = Lwt_main.run (Migration.up migrate_url) in
+      (match up_legacy with
+      | Error e -> (check "migration up (legacy): converged + recorded" false; Printf.eprintf "  up: %s\n%!" e; exit 1)
+      | Ok _ -> check "migration up (legacy): converged + recorded" true);
+      let legacy_tables = migrate_tables migrate_db in
+      check "migration up (legacy): full schema present"
+        (legacy_tables = "chunks,holdings,ownership_events,schema_migrations");
+      let legacy_count =
         (match pg_query migrate_db "SELECT count(*)::int FROM schema_migrations"
          with [ [ n ] ] -> int_of_string n | _ -> -1)
       in
-      check "migration baseline (legacy): 6 migrations recorded" (baseline_count = 6);
+      check "migration up (legacy): 6 migrations recorded" (legacy_count = 6);
       (* (f) an applied-history gap is refused *)
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
       pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
@@ -511,32 +508,18 @@ let () =
       check "migration up (concurrent): both succeed"
         (match (!up1, !up2) with Ok _, Ok _ -> true | _ -> false);
       (* (h) an early checksum mismatch is an error (immutability guard):
-         tamper with 0001, expect up to refuse, then restore the file. *)
-      let with_tampered_file (f : string) (action : unit -> unit) : unit =
-        let orig =
-          In_channel.with_open_text f (fun ic -> really_input_string ic (in_channel_length ic))
-        in
-        let restore () = Out_channel.with_open_text f (fun oc -> output_string oc orig) in
-        Out_channel.with_open_text f (fun oc -> output_string oc (orig ^ "-- tampered\n"));
-        (try action () with e -> (restore (); raise e));
-        restore ()
-      in
+         corrupt the RECORDED checksum for version 1 (simulating a changed
+         file) without touching any source file, and expect up to refuse. *)
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
       pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
       let _ = Lwt_main.run (Migration.up migrate_url) in
-      with_tampered_file "schema/0001_init.sql" (fun () ->
-          let up_tampered = Lwt_main.run (Migration.up migrate_url) in
-          (match up_tampered with
-           | Ok _ -> check "migration up (tampered 0001): refused" false
-           | Error e ->
-             (check "migration up (tampered 0001): refused" true;
-              check "migration up (tampered 0001): mentions changed" (contains e "changed"))));
-      (* confirm the restore: a clean up now succeeds *)
-      let up_restored = Lwt_main.run (Migration.up migrate_url) in
-      (match up_restored with
-       | Ok _ -> check "migration up (restored 0001): ok" true
+      pg_exec migrate_db "UPDATE schema_migrations SET checksum = 'deadbeef' WHERE version = 1;";
+      let up_stale = Lwt_main.run (Migration.up migrate_url) in
+      (match up_stale with
+       | Ok _ -> check "migration up (stale checksum): refused" false
        | Error e ->
-         (check "migration up (restored 0001): ok" false; Printf.eprintf "  up: %s\n%!" e; exit 1));
+         (check "migration up (stale checksum): refused" true;
+          check "migration up (stale checksum): mentions changed" (contains e "changed")));
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
 
       (* scratch database *)

@@ -38,16 +38,20 @@ time="..." level=info msg="raguesslighter-db started"
 The container starts PostgreSQL 17 with the pgvector extension. It does
 **not** create the schema: `dune exec bin/migrate.exe -- up` is the sole
 schema authority (it applies the `schema/*.sql` files and records them).
+Check it with `podman compose ps` — you will notice `raguesslighter-db`
+listed as **healthy** after a few seconds.
 
-Check it, then apply the schema once it accepts connections:
+The migration tool reads `DATABASE_URL` from the `.env` file, so create
+that file before applying the schema (you will finish configuring it in the
+next step):
 
 ```sh
-podman compose ps
+cp .env.example .env
 ```
 
-You will notice `raguesslighter-db` listed as **healthy** after a few
-seconds. `up -d` does not wait for that healthcheck, so wait for Postgres to
-accept connections before running the migration (bounded to ~30 s):
+`up -d` does not wait for the healthcheck, so wait for Postgres to accept
+connections before running the migration (bounded to ~30 s), then apply the
+schema:
 
 ```sh
 for i in $(seq 30); do
@@ -70,11 +74,8 @@ other Postgres is off, and start again.
 
 ## 2. Configure the app
 
-```sh
-cp .env.example .env
-```
-
-Then open `.env` in an editor and set **three things**:
+The `.env` file already exists (created in the previous step). Open it in
+an editor and set **three things**:
 
 1. `SEC_USER_AGENT` — your name and email. The SEC requires a
    contact address in every request (fair access policy).

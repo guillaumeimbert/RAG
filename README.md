@@ -92,7 +92,10 @@ The docs follow the [Diátaxis](https://diataxis.fr) framework —
 # 1. prerequisites: OCaml 5.5.0 (opam switch `raguesslighter`), podman,
 #    a running OpenAI-compatible server for chat + embeddings
 
-# 2. database (Postgres 17 + pgvector; the schema is applied by `migrate up`)
+# 2. configuration (needed by `migrate up`, which reads DATABASE_URL from .env)
+cp .env.example .env       # then edit: SEC_USER_AGENT, OPENAI_BASE_URL, models
+
+# 3. database (Postgres 17 + pgvector; the schema is applied by `migrate up`)
 podman compose up -d
 # wait for Postgres to accept connections (bounded to ~30 s), then apply the schema
 for i in $(seq 30); do
@@ -100,9 +103,6 @@ for i in $(seq 30); do
   sleep 1
 done
 dune exec bin/migrate.exe -- up
-
-# 3. configuration
-cp .env.example .env       # then edit: SEC_USER_AGENT, OPENAI_BASE_URL, models
 
 # 4. build
 dune build

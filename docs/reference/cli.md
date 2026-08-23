@@ -126,7 +126,7 @@ The applied history must be a **valid prefix** of the available files: every
 recorded version is a local file, and the recorded set is exactly the first
 `k` local versions (no gaps, no unknown versions, no missing files). A history
 that is not a valid prefix (e.g. `0001` and `0003` recorded but not `0002`)
-is an error on `up`, `status`, and `baseline`.
+is an error on `up` and `status`.
 
 ### `migrate up`
 
@@ -137,6 +137,13 @@ commit or roll back together), under a PostgreSQL advisory lock so concurrent
 database this brings the schema up to date; on an existing database it applies
 only the new files.
 
+A database created before the `schema_migrations` tracker existed (the schema
+present but with no records) is brought up to date by `up`: the migrations are
+idempotent and corrective (they guard each structural change), so re-running
+them converges the schema to the current definitions before the checksums are
+recorded. There is no separate "record without re-running" command — re-running
+is safe and guarantees the converged definitions match the recorded checksums.
+
 The applied migrations' checksums are verified against their files (an
 immutability guard): a recorded migration whose file has changed is an error.
 Never edit an applied migration — add a new `NNNN_*.sql` file instead.
@@ -146,22 +153,3 @@ Never edit an applied migration — add a new `NNNN_*.sql` file instead.
 Report the applied and pending migrations (no changes). The `schema_migrations`
 table is created (and the advisory lock is taken) so the command is safe on an
 empty database. Refuses an inconsistent applied history.
-
-### `migrate baseline`
-
-Record the `schema/*.sql` files up to and including the supported legacy
-schema version (currently version 6, the version the fingerprint corresponds
-to) as applied **without re-running them**. This is the one-time transition
-for databases that already have that schema but no `schema_migrations`
-records (e.g. initialized by an older version of `compose.yaml`, which used to
-apply the schema files via `docker-entrypoint-initdb.d` without leaving
-records). `baseline` **verifies the schema is present** (a clearly-scoped
-fingerprint: the public tables `chunks`/`holdings`/`ownership_events`, the key
-columns `chunks.embedding`, `holdings.position_index`, and
-`ownership_events.event_index`, the `chunks_text_nonempty` constraint, and the
-`chunks_embedding_hnsw` index) and refuses an empty or partially-initialized
-database — run `migrate up` instead on those. It also refuses a file whose
-recorded checksum no longer matches, and any migration file beyond the
-supported legacy version (extend `verify_schema` and bump `baseline_version`
-when a new migration is added). After `baseline`, `migrate up` applies only
-files added later.
