@@ -114,7 +114,13 @@ let pg_query dbname sql : string list list =
       | _ -> (c#finish; failwith ("SQL failed: " ^ r#error)))
    with Postgresql.Error e -> (c#finish; failwith (Postgresql.string_of_error e)))
 
-let openai_handler (path : string) (body : string) : Mock.resp option =
+(* Fault injection for the failure-classification tests: when [Some code],
+   the corresponding endpoint returns [code] for every request (the client
+   then retries to exhaustion and raises [Net.Http_error]). *)
+let openai_fault : int option ref = ref None
+let edgar_fault : int option ref = ref None
+
+let openai_handler_ok (path : string) (body : string) : Mock.resp option =
   let json s = Some { Mock.code = 200; content_type = "application/json"; body = s } in
   (match path with
   | "/v1/embeddings" ->
@@ -157,7 +163,14 @@ let openai_handler (path : string) (body : string) : Mock.resp option =
             ; "usage", `Assoc [ "prompt_tokens", `Int 0; "total_tokens", `Int 0 ] ]))
   | _ -> None)
 
-let edgar_handler (path : string) (_body : string) : Mock.resp option =
+let openai_handler (path : string) (body : string) : Mock.resp option =
+  (match !openai_fault with
+  | Some code ->
+    Some { Mock.code = code; content_type = "application/json"; body = "fault-injected" }
+  | None -> openai_handler_ok path body)
+
+
+let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
   let html s = Some { Mock.code = 200; content_type = "text/html"; body = s } in
   let xml s = Some { Mock.code = 200; content_type = "text/xml"; body = s } in
   let doc = fixture "nvda_8k.html" in
@@ -180,7 +193,24 @@ let edgar_handler (path : string) (_body : string) : Mock.resp option =
     Some { Mock.code = 200; content_type = "application/json"; body = fixture "nvda_submissions.json" }
   | "/files/company_tickers.json" ->
     Some { Mock.code = 200; content_type = "application/json"; body = fixture "company_tickers.json" }
+  (* fault-injection / robustness filings (fresh accessions, not otherwise
+     ingested so the jobs are not skipped as already present) *)
+  | "/Archives/edgar/data/1045810/000104581026000090/nvda-20260901.htm" -> html doc
+  | "/Archives/edgar/data/1045810/000104581026000092/nvda-20260903.htm" -> html doc
+  | "/Archives/edgar/data/1045810/000104581026000095/nvda-20260905.htm" -> html doc
+  | "/Archives/edgar/data/1045810/000104581026000097/nvda-20260907.htm" -> html ""
+  | "/Archives/edgar/data/1045810/000104581026000091/primary_doc.xml" ->
+    xml (fixture "13g_nvda.xml")
+  | "/Archives/edgar/data/1045810/000104581026000093/primary_doc.xml" ->
+    xml (fixture "13g_nvda.xml")
   | _ -> None)
+
+let edgar_handler (path : string) (_body : string) : Mock.resp option =
+  (match !edgar_fault with
+  | Some code ->
+    Some { Mock.code = code; content_type = "text/html"; body = "fault-injected" }
+  | None -> edgar_handler_ok path _body)
+
 
 (* ------------------------------------------------------------------ *)
 (* Test                                                                *)
@@ -193,9 +223,19 @@ let check (name : string) (cond : bool) : unit =
 
 let () =
   if not (pg_available ())
-  then (
-    print_endline "e2e: SKIP (Postgres not reachable at 127.0.0.1:5432)";
-    exit 0)
+  then
+    ( (* Under CI, [RAG_E2E_REQUIRE_PG] is set: a missing database is a hard
+         failure (the workflow provides Postgres) rather than a silent skip.
+         Locally, the test skips gracefully when Postgres is absent. *)
+      (match Sys.getenv_opt "RAG_E2E_REQUIRE_PG" with
+       | Some _ ->
+         Printf.eprintf
+           "e2e: FAIL (Postgres not reachable at 127.0.0.1:5432 but \
+            RAG_E2E_REQUIRE_PG is set — the database must be present)\n%!";
+         exit 1
+       | None ->
+         print_endline "e2e: SKIP (Postgres not reachable at 127.0.0.1:5432)";
+         exit 0) )
   else
     let edgar_sock = ref None in
     let openai_sock = ref None in
@@ -211,6 +251,9 @@ let () =
       pg_exec scratch_db schema;
       pg_exec scratch_db schema2;
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;
+
+      (* Make 429/5xx retry loops (fault injection) finish instantly. *)
+      Net.set_backoff_scale 0.0;
 
       (* mock servers *)
       let (edgar_port, es) = Mock.start edgar_handler in
@@ -379,6 +422,271 @@ let () =
       let vecs = Lwt_main.run (Openai.embed ~cfg [ "alpha"; "beta" ]) in
       check "openai.embed: one vector per input"
         (List.length vecs = 2 && List.for_all (fun v -> List.length v = embed_dim) vecs);
+
+      (* ---------------------------------------------------------------- *)
+      (* 7. Failure classification and robustness (fault injection)       *)
+      (* ---------------------------------------------------------------- *)
+      let mk_index (accession : string) (form : string) (primary_document : string) =
+        {
+          Edgar.accession;
+          cik = "1045810";
+          company = "NVIDIA CORP";
+          form;
+          filed_at = Date.of_string "2026-09-01";
+          report_date = None;
+          primary_document;
+          primary_description = "";
+          (* index_url uses the dashed accession (codebase convention); the
+             document path is derived undashed by [Edgar.accession_root]. *)
+          index_url =
+            edgar_base ^ "/Archives/edgar/data/1045810/" ^ accession ^ "-index.htm";
+          ticker = "NVDA";
+        }
+      in
+      let count_where (table : string) (doc_id : string) =
+        (match
+           pg_query scratch_db
+             (Printf.sprintf "SELECT count(*)::int FROM %s WHERE %s = '%s'" table
+                (if table = "chunks" then "doc_id" else "accession")
+                doc_id)
+         with
+         | [ [ n ] ] -> int_of_string n
+         | _ -> failwith "count_where: unexpected result shape")
+      in
+
+      (* 7a. inference 500 -> Failed (not Skipped), nothing stored *)
+      openai_fault := Some 500;
+      let r500 =
+        Lwt_main.run
+          (Pipeline.ingest_job_safe store
+             (Pipeline.make_job (mk_index "0001045810-26-000090" "8-K" "nvda-20260901.htm")))
+      in
+      check "inference 500: classified as Failed"
+        (match r500 with Pipeline.Failed _ -> true | _ -> false);
+      check "inference 500: nothing stored" (count_where "chunks" "0001045810-26-000090" = 0);
+
+      (* 7b. inference 429 (retried to exhaustion) -> Failed *)
+      openai_fault := Some 429;
+      let r429 =
+        Lwt_main.run
+          (Pipeline.ingest_job_safe store
+             (Pipeline.make_job (mk_index "0001045810-26-000092" "8-K" "nvda-20260903.htm")))
+      in
+      check "inference 429: classified as Failed"
+        (match r429 with Pipeline.Failed _ -> true | _ -> false);
+      check "inference 429: nothing stored" (count_where "chunks" "0001045810-26-000092" = 0);
+      openai_fault := None;
+
+      (* 7c. EDGAR 404 -> Skipped (the document vanished) *)
+      edgar_fault := Some 404;
+      let r404 =
+        Lwt_main.run
+          (Pipeline.ingest_job_safe store
+             (Pipeline.make_job (mk_index "0001045810-26-000091" "13G" "primary_doc.xml")))
+      in
+      check "EDGAR 404: classified as Skipped"
+        (match r404 with Pipeline.Skipped -> true | _ -> false);
+      check "EDGAR 404: nothing stored"
+        (count_where "ownership_events" "0001045810-26-000091" = 0);
+
+      (* 7d. EDGAR 500 (retried to exhaustion) -> Failed, not Skipped *)
+      edgar_fault := Some 500;
+      let r500e =
+        Lwt_main.run
+          (Pipeline.ingest_job_safe store
+             (Pipeline.make_job (mk_index "0001045810-26-000093" "13G" "primary_doc.xml")))
+      in
+      check "EDGAR 500: classified as Failed"
+        (match r500e with Pipeline.Failed _ -> true | _ -> false);
+      check "EDGAR 500: nothing stored"
+        (count_where "ownership_events" "0001045810-26-000093" = 0);
+      edgar_fault := None;
+
+      (* 7e. empty prose document -> Ingested with zero chunks, no error *)
+      let rempty =
+        Lwt_main.run
+          (Pipeline.ingest_job_safe store
+             (Pipeline.make_job (mk_index "0001045810-26-000097" "8-K" "nvda-20260907.htm")))
+      in
+      check "empty document: Ingested with zero chunks"
+        (match rempty with Pipeline.Ingested r -> r.chunks = 0 | _ -> false);
+      check "empty document: nothing stored" (count_where "chunks" "0001045810-26-000097" = 0);
+
+      (* 7f. transaction rollback: a successful write followed by a failure
+         inside the same transaction leaves nothing behind. *)
+      let rrow =
+        {
+          Store.doc_id = "rollback-test";
+          company = "X";
+          cik = "1";
+          ticker = "";
+          form = "8-K";
+          filed_at = "2026-09-01";
+          section = "s";
+          chunk_index = 0;
+          text = "rollback probe";
+          embedding = Store.vector_to_string (mock_vector "rollback probe");
+        }
+      in
+      let rollback_raised = ref false in
+      let () =
+        Lwt_main.run
+          (Lwt.catch
+             (fun () ->
+               Store.with_tx store (fun conn ->
+                 Lwt.bind (Store.upsert_chunks_on conn [ rrow ]) (function
+                   | Ok () -> Lwt.fail (Store.Db "boom after a successful write")
+                   | Error _ as e -> Lwt.return e)))
+             (function
+               | Store.Db _ -> (rollback_raised := true; Lwt.return_unit)
+               | e -> (rollback_raised := true; Lwt.fail e)))
+      in
+      check "rollback: failure surfaces as Store.Db" !rollback_raised;
+      check "rollback: the written chunk was not persisted"
+        (count_where "chunks" "rollback-test" = 0);
+
+      (* 7g. commit: a clean transaction persists its rows. *)
+      let () =
+        Lwt_main.run (Store.with_tx store (fun conn -> Store.upsert_chunks_on conn [ rrow ]))
+      in
+      check "commit: the chunk was persisted" (count_where "chunks" "rollback-test" = 1);
+      let () = pg_exec scratch_db "DELETE FROM chunks WHERE doc_id = 'rollback-test';" in
+
+      (* 7h. upsert_13gd atomicity: the second write fails (wrong vector
+         dimension), so the events written earlier in the same transaction
+         roll back too. *)
+      let ev =
+        {
+          Store.accession = "atom-test";
+          form = "13G";
+          event_date = "2026-09-01";
+          filed_at = "2026-09-01";
+          filer_cik = "1045810";
+          filer_name = "NVIDIA";
+          subject_cik = "1513845";
+          subject_name = "NEBIUS";
+          subject_cusip = "";
+          class_name = "Class A";
+          shares = Some 100;
+          percent = Some 5.0;
+          passive = true;
+          is_amendment = false;
+          index_url = "";
+        }
+      in
+      let bad_chunk =
+        {
+          Store.doc_id = "atom-test";
+          company = "X";
+          cik = "1045810";
+          ticker = "";
+          form = "13G";
+          filed_at = "2026-09-01";
+          section = "items";
+          chunk_index = 0;
+          text = "atomicity probe";
+          (* 9 dims <> embed_dim 8 -> the chunks write fails. *)
+          embedding = Store.vector_to_string (List.init 9 (fun _ -> 0.1));
+        }
+      in
+      let atom_raised = ref false in
+      let () =
+        Lwt_main.run
+          (Lwt.catch
+             (fun () -> Store.upsert_13gd store [ ev ] [ bad_chunk ])
+             (function
+               | Store.Db _ -> (atom_raised := true; Lwt.return_unit)
+               | e -> (atom_raised := true; Lwt.fail e)))
+      in
+      check "upsert_13gd atomicity: failure surfaces as Store.Db" !atom_raised;
+      check "upsert_13gd atomicity: events rolled back"
+        (count_where "ownership_events" "atom-test" = 0);
+      check "upsert_13gd atomicity: chunks rolled back"
+        (count_where "chunks" "atom-test" = 0);
+
+      (* 7i. forced re-ingest: bypasses the already-ingested check and fully
+         replaces the stored rows (no duplication). *)
+      let force_doc = "0001045810-26-000095" in
+      let fjob = Pipeline.make_job (mk_index force_doc "8-K" "nvda-20260905.htm") in
+      let r1 = Lwt_main.run (Pipeline.ingest_job_safe store fjob) in
+      let n1 = (match r1 with Pipeline.Ingested r -> r.chunks | _ -> -1) in
+      check "force: first ingest succeeded" (n1 > 0);
+      let r2 = Lwt_main.run (Pipeline.ingest_job_safe store fjob) in
+      check "force: plain re-run is Skipped (already ingested)"
+        (match r2 with Pipeline.Skipped -> true | _ -> false);
+      let r3 = Lwt_main.run (Pipeline.ingest_job_safe ~force:true store fjob) in
+      check "force: forced re-ingest is Ingested (bypasses the check)"
+        (match r3 with Pipeline.Ingested _ -> true | _ -> false);
+      check "force: rows replaced, not duplicated" (count_where "chunks" force_doc = n1);
+
+      (* 7j. CLI exit codes (the real ingest binary, as a subprocess): a run
+         with failed filings exits non-zero; a clean run and a bad date
+         behave correctly. Requires RAG_E2E_INGEST_BIN (CI sets it). *)
+      ( match Sys.getenv_opt "RAG_E2E_INGEST_BIN" with
+      | Some bin when Sys.file_exists bin ->
+        let cli_db = "raguesslighter_e2e_cli" in
+        let () =
+          pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ cli_db ^ ";");
+          pg_exec pg_main_db ("CREATE DATABASE " ^ cli_db ^ ";");
+          let schema =
+            Test_fixtures.read_text (Test_fixtures.schema_file "0001_init.sql")
+            |> rewrite_dim embed_dim
+          in
+          let schema2 = Test_fixtures.read_text (Test_fixtures.schema_file "0002_ownership.sql") in
+          pg_exec cli_db schema;
+          pg_exec cli_db schema2
+        in
+        let env_file = Filename.temp_file "rag_e2e_env" ".env" in
+        let () =
+          let out = open_out env_file in
+          output_string out
+            ( String.concat "\n"
+                [ "DATABASE_URL=postgresql://" ^ pg_user ^ ":" ^ pg_pass ^ "@" ^ pg_host
+                  ^ ":" ^ (string_of_int pg_port) ^ "/" ^ cli_db
+                ; "OPENAI_BASE_URL=http://127.0.0.1:" ^ (string_of_int openai_port) ^ "/v1"
+                ; "OPENAI_API_KEY=test-key"
+                ; "OPENAI_EMBED_BASE_URL=http://127.0.0.1:" ^ (string_of_int openai_port)
+                  ^ "/v1"
+                ; "OPENAI_EMBED_API_KEY=test-key"
+                ; "LLM_MODEL=mock-llm"; "EMBEDDING_MODEL=mock-embed"
+                ; "EMBEDDING_DIM=" ^ (string_of_int embed_dim)
+                ; "SEC_USER_AGENT=test@example.com (e2e)"
+                ; "SEC_BROWSE_EDGAR_BASE=" ^ edgar_base ^ "/cgi-bin/browse-edgar"
+                ; "SEC_DAILY_INDEX_BASE=" ^ edgar_base
+                ; "SEC_SUBMISSIONS_BASE=" ^ edgar_base ^ "/submissions"
+                ; "SEC_FTS_BASE=" ^ edgar_base ^ "/full-text/search"
+                ; "SEC_ARCHIVES_BASE=" ^ edgar_base ^ "/Archives/edgar/data"
+                ; "SEC_COMPANY_TICKERS_URL=" ^ edgar_base ^ "/files/company_tickers.json"
+                ; "FORMS=10-K,10-Q,8-K,13F-HR,13G"
+                ; "CHUNK_SIZE=900"; "CHUNK_OVERLAP=120"; "TOP_K=8" ] );
+          close_out out
+        in
+        let run_exit_zero (cmd : string) : bool =
+          match Unix.system cmd with
+          | Unix.WEXITED c -> c = 0
+          | _ -> false
+        in
+        check "CLI: an invalid date exits non-zero"
+          (not
+             (run_exit_zero
+                (Printf.sprintf "%s day NOT_A_DATE --env-file %s >/dev/null 2>&1" bin env_file))
+          );
+        (* 400 is not retried, so the subprocess fails fast; the 500/429
+           retry-to-exhaustion path is covered in-process above. *)
+        openai_fault := Some 400;
+        check "CLI: a run with failed filings exits non-zero"
+          (not
+             (run_exit_zero
+                (Printf.sprintf "%s ticker --env-file %s NVDA >/dev/null 2>&1" bin env_file))
+          );
+        openai_fault := None;
+        check "CLI: a clean run (stats) exits zero"
+          (run_exit_zero (Printf.sprintf "%s stats --env-file %s >/dev/null 2>&1" bin env_file));
+        (try Unix.unlink env_file with _ -> ());
+        pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ cli_db ^ ";")
+      | _ ->
+        Printf.printf
+          "  ..  CLI exit-code test skipped (set RAG_E2E_INGEST_BIN to the built ingest binary)\n%!" );
 
       (* cleanup *)
       Lwt_main.run (Store.close store);

@@ -76,7 +76,13 @@ let sec_headers ~user_agent () =
     ; "Accept", "application/xml, application/json, text/html;q=0.9, */*;q=0.8"
     ; "Accept-Encoding", "gzip" ]
 
-let backoff attempt = min (0.5 *. 2.0 ** float_of_int attempt) 30.0
+(* Test hook: scales the retry backoff delay. Production leaves it at 1.0;
+   the e2e tests set it to 0.0 so 429/5xx fault-injection runs (which retry
+   to exhaustion) finish instantly. *)
+let backoff_scale = ref 1.0
+let set_backoff_scale (f : float) = backoff_scale := f
+
+let backoff attempt = min (0.5 *. 2.0 ** float_of_int attempt *. !backoff_scale) 30.0
 
 let request ?throttle ?retries ~headers ?(body = None) meth url :
     string Lwt.t =

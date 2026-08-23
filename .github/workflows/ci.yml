@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # pgvector-backed PostgreSQL 17. e2e connects as user
+      # "raguesslighter" to the "raguesslighter" database on 127.0.0.1:5432
+      # and creates a scratch database of its own.
+      db:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: raguesslighter
+          POSTGRES_PASSWORD: raguesslighter
+          POSTGRES_DB: raguesslighter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U raguesslighter"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OPAMYES: "1"
+      RAG_E2E_REQUIRE_PG: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl \
+            libpq-dev libssl-dev zlib1g-dev libffi-dev
+
+      - name: Set up OCaml
+        run: |
+          curl -fsSL https://install.opam.org/opam-installer.sh -o opam-installer.sh
+          bash opam-installer.sh --disable-sandboxing -y
+          eval $(opam env)
+          opam init --bare --yes --disable-sandboxing
+          opam switch create 5.5.0 --yes
+          eval $(opam env)
+          ocaml -version
+          dune --version || true
+
+      - name: Install OCaml dependencies
+        run: |
+          eval $(opam env)
+          opam install . --deps-only --yes
+
+      - name: Build
+        run: |
+          eval $(opam env)
+          dune build
+
+      - name: Unit tests
+        run: |
+          eval $(opam env)
+          ./_build/default/test/test.exe
+
+      - name: End-to-end tests (against Postgres)
+        run: |
+          eval $(opam env)
+          export RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe"
+          ./_build/default/test/e2e.exe

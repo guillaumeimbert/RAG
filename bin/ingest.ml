@@ -32,6 +32,14 @@ let env_arg () =
     (Arg.opt Arg.string ".env"
        (Arg.info ["e"; "env-file"] ~docv:"FILE" ~doc:"Path to the .env file."))
 
+let force_arg () =
+  Arg.value
+    (Arg.flag
+       (Arg.info [ "F"; "force" ]
+          ~doc:"Force re-ingest of filings already in the store: bypass the\
+                already-ingested check and replace their stored rows (use to\
+                repair data written by an older build, e.g. after re-embedding)."))
+
 let parse_date s =
   (try Date.of_string s
    with Failure _ -> raise (Edgar.Failure (s ^ ": invalid date (expected YYYY-MM-DD)")))
@@ -60,14 +68,16 @@ let day_cmd =
          (Arg.info [] ~docv:"DATE" ~doc:"Filing date to ingest (YYYY-MM-DD)."))
   in
   let env = env_arg () in
+  let force = force_arg () in
   let term =
     let open Term.Syntax in
     let+ d = date
     and+ e = env
+    and+ f = force
     in
     run_job ~env_file:e (fun store _cfg ->
         let d = parse_date d in
-        Lwt.bind (Pipeline.ingest_day store d) (fun s ->
+        Lwt.bind (Pipeline.ingest_day ~force:f store d) (fun s ->
           Printf.printf "%s  %s\n" (Date.to_string d) (Pipeline.show_stats s);
           finish s))
   in
@@ -89,16 +99,19 @@ let backfill_cmd =
          (Arg.info ["to"] ~docv:"DATE" ~doc:"Last date, inclusive (YYYY-MM-DD)."))
   in
   let env = env_arg () in
+  let force = force_arg () in
   let term =
     let open Term.Syntax in
     let+ f = from
     and+ t = to_
     and+ e = env
+    and+ fo = force
     in
     run_job ~env_file:e (fun store _cfg ->
         match (f, t) with
         | Some f, Some t ->
-          Lwt.bind (Pipeline.ingest_range store (parse_date f) (parse_date t)) (fun s ->
+          Lwt.bind (Pipeline.ingest_range ~force:fo store (parse_date f) (parse_date t))
+            (fun s ->
             Printf.printf "total  %s\n" (Pipeline.show_stats s);
             finish s)
         | _ -> raise (Edgar.Failure "backfill requires both --from and --to"))
@@ -124,15 +137,17 @@ let cik_cmd =
          (Arg.info [ "l"; "limit" ] ~docv:"N"
             ~doc:"Ingest at most the N most recent filings (default: all)."))
   in
+  let force = force_arg () in
   let term =
     let open Term.Syntax in
     let+ c = cik
     and+ e = env
     and+ l = limit
+    and+ f = force
     in
     run_job ~env_file:e (fun store _cfg ->
         let limit = if l > 0 then Some l else None in
-        Lwt.bind (Pipeline.ingest_cik ?limit store c) (fun s ->
+        Lwt.bind (Pipeline.ingest_cik ?limit ~force:f store c) (fun s ->
           Printf.printf "CIK %s  %s\n" c (Pipeline.show_stats s);
           finish s))
   in
@@ -151,18 +166,20 @@ let ticker_cmd =
          (Arg.info [ "l"; "limit" ] ~docv:"N"
             ~doc:"Ingest at most the N most recent filings (default: all)."))
   in
+  let force = force_arg () in
   let term =
     let open Term.Syntax in
     let+ t = ticker
     and+ e = env
     and+ l = limit
+    and+ f = force
     in
     run_job ~env_file:e (fun store cfg ->
         let limit = if l > 0 then Some l else None in
         Lwt.bind (Edgar.cik_of_ticker cfg t) (function
           | None -> raise (Edgar.Failure ("unknown ticker: " ^ t))
           | Some cik ->
-            Lwt.bind (Pipeline.ingest_cik ?limit store cik) (fun s ->
+            Lwt.bind (Pipeline.ingest_cik ?limit ~force:f store cik) (fun s ->
               Printf.printf "%s (CIK %s)  %s\n" t cik (Pipeline.show_stats s);
               finish s)))
   in

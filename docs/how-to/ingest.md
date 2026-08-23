@@ -32,6 +32,28 @@ the store — re-running the same command is safe and changes nothing.
 run exits non-zero when it is non-zero (nothing partial was stored —
 writes are transactional — so a re-run retries those filings).
 
+## Repair or re-ingest a filing that is already stored
+
+By default an accession already in the store is skipped, so a plain
+re-run never overwrites what is stored. Use `--force` (`-F`) to bypass
+that check and **replace** the stored rows for the filing:
+
+```sh
+ingest.exe ticker NVDA --force
+ingest.exe day 2026-08-20 -F
+```
+
+Forced re-ingest is the repair path for a filing that was stored
+corrupt or incomplete (e.g. an early version of the parser wrote the
+wrong rows, or the embedding model changed and you want every vector
+rebuilt). The replacement is atomic: for each filing the stored chunks
+(and, for ownership filings, the ownership events / 13F positions) are
+deleted and the fresh rows written in a single transaction, so a
+filing is never left half-replaced. A force run re-fetches and
+re-embeds every matching filing, so it is slower than a plain re-run —
+use it to fix a specific scope (`--limit`, a single `day`, one
+`ticker`/`cik`), not to re-walk the whole history.
+
 ## Ingest one business day
 
 ```sh
@@ -99,4 +121,9 @@ ownership events: 3
 - `403` from the SEC → `SEC_USER_AGENT` must contain your name and a
   contact address.
 - A filing line like `skip 000…: parse error …` → one filing's
-  document was unparseable; it is skipped and the run continues.
+  document was unparseable (or EDGAR returned 404 for it); it is
+  skipped and the run continues.
+- A `FAIL 000…: …` line → a real failure of that filing: a non-404
+  EDGAR error (5xx, 429 after retries), an inference-server error, or a
+  database write failure. Nothing partial was stored, so the run exits
+  non-zero and a re-run retries the filing.

@@ -143,11 +143,11 @@ let chunk_rows (index : Edgar.filing_index) (embedded : (Chunk.block * float lis
 (** Narrative forms (10-K / 10-Q / 8-K / ...): HTML -> text -> chunks ->
     vectors. Fetch, parse and embed happen first; the chunks are then
     stored in one transaction. *)
-let ingest_prose_filing (store : Store.t) (job : job) : job_result Lwt.t =
+let ingest_prose_filing ?force (store : Store.t) (job : job) : job_result Lwt.t =
   Lwt.bind (Edgar.get_document store.Store.cfg job.primary_url) (fun html ->
     Lwt.bind (embed_blocks store (Html_text.of_html html)) (fun embedded ->
       let rows = chunk_rows job.index embedded in
-      Lwt.bind (Store.upsert_chunks store rows) (fun () ->
+      Lwt.bind (Store.upsert_chunks ?force store rows) (fun () ->
         Lwt.return (Ingested { chunks = List.length rows; events = 0; positions = 0 }))))
 
 (** 13G / 13D: raw XML -> structured ownership events; the narrative
@@ -156,7 +156,7 @@ let ingest_prose_filing (store : Store.t) (job : job) : job_result Lwt.t =
     and the events and chunks are stored in a single transaction: a
     failure at any point leaves nothing behind, so the next run retries
     the whole filing instead of finding it "already ingested". *)
-let ingest_13gd (store : Store.t) (job : job) : job_result Lwt.t =
+let ingest_13gd ?force (store : Store.t) (job : job) : job_result Lwt.t =
   let cfg = store.Store.cfg in
   let index = job.index in
   let meta =
@@ -181,13 +181,13 @@ let ingest_13gd (store : Store.t) (job : job) : job_result Lwt.t =
     in
     Lwt.bind embedded (fun emb ->
       let ch_rows = chunk_rows index emb in
-      Lwt.bind (Store.upsert_13gd store ev_rows ch_rows) (fun () ->
+      Lwt.bind (Store.upsert_13gd ?force store ev_rows ch_rows) (fun () ->
         Lwt.return (Ingested { chunks = List.length ch_rows; events = List.length ev_rows; positions = 0 }))))
 
 (** 13F-HR: raw XML -> structured holdings. Issuer CIKs are resolved
     best-effort against the company-tickers file; unresolved issuers keep
     an empty CIK and remain queryable by name. *)
-let ingest_13f (store : Store.t) (job : job) : job_result Lwt.t =
+let ingest_13f ?force (store : Store.t) (job : job) : job_result Lwt.t =
   let cfg = store.Store.cfg in
   let index = job.index in
   let meta =
@@ -203,8 +203,12 @@ let ingest_13f (store : Store.t) (job : job) : job_result Lwt.t =
         Edgar.get_document cfg (Edgar.info_table_url index)
         >>= fun s -> Lwt.return (Some s))
       (function
-        | Net.Http_error e ->
-          Printf.eprintf "  %s: no information table (%s)\n%!" index.accession (Net.show_error e);
+        | Net.Http_error e when e.Net.status = 404 ->
+          (* The information table can legitimately be absent (or the pointer
+             in the cover stale): treat as "no positions". Only a 404
+             qualifies - any other HTTP error (5xx/429/timeout) is re-raised
+             so the filing counts as failed instead of being dropped. *)
+          Printf.eprintf "  %s: no information table (404)\n%!" index.accession;
           Lwt.return None
         | e -> Lwt.fail e)
   in
@@ -244,40 +248,55 @@ let ingest_13f (store : Store.t) (job : job) : job_result Lwt.t =
             ; vote_none = p.vote_none })
           t13f.positions ciks
       in
-      Lwt.bind (Store.upsert_holdings store rows) (fun () ->
+      Lwt.bind (Store.upsert_holdings ?force store rows) (fun () ->
         Lwt.return (Ingested { chunks = 0; events = 0; positions = List.length rows }))))
 
 (** Route one filing to its pipeline by form class. *)
-let ingest_job (store : Store.t) (job : job) : job_result Lwt.t =
+let ingest_job ?(force = false) (store : Store.t) (job : job) : job_result Lwt.t =
   let cfg = store.Store.cfg in
   let doc_id = job.index.accession in
+  let route (f : bool) =
+    match Ownership.classify job.index.form with
+    | Ownership.Prose -> ingest_prose_filing ~force:f store job
+    | Ownership.Form13g | Ownership.Form13d -> ingest_13gd ~force:f store job
+    | Ownership.Form13f -> ingest_13f ~force:f store job
+  in
   if Config.forms_allow cfg job.index.form = false
   then Lwt.return Skipped
   else
-    Lwt.bind (Store.filing_exists store doc_id) (fun exists ->
-      if exists
-      then Lwt.return Skipped
-      else
-        match Ownership.classify job.index.form with
-        | Ownership.Prose -> ingest_prose_filing store job
-        | Ownership.Form13g | Ownership.Form13d -> ingest_13gd store job
-        | Ownership.Form13f -> ingest_13f store job)
+    (* A forced re-ingest bypasses the "already ingested" check and fully
+       replaces the stored rows (see Store.upsert_* ~force). *)
+    if force
+    then route true
+    else
+      Lwt.bind (Store.filing_exists store doc_id) (fun exists ->
+        if exists then Lwt.return Skipped else route false)
 
 (** [ingest_job] with per-filing fault isolation: a fetch/parse error
     skips that filing (with a warning) instead of aborting the run; an
     embedding or database failure is reported as [Failed] (again without
     aborting the run) — in both cases nothing partial was written, so a
     re-run retries the filing. *)
-let ingest_job_safe (store : Store.t) (job : job) : job_result Lwt.t =
+let ingest_job_safe ?(force = false) (store : Store.t) (job : job) : job_result Lwt.t =
   Lwt.catch
-    (fun () -> ingest_job store job)
+    (fun () -> ingest_job ~force store job)
     (function
       | Edgar.Failure msg ->
         Printf.eprintf "  skip %s: %s\n%!" job.index.accession msg;
         Lwt.return Skipped
       | Net.Http_error e ->
-        Printf.eprintf "  skip %s: %s\n%!" job.index.accession (Net.show_error e);
-        Lwt.return Skipped
+        (* Inference-server HTTP errors are wrapped into [Openai.Api_error]
+           upstream, so any [Net.Http_error] here is an EDGAR fetch failure.
+           Only a genuine 404 (the document vanished, possibly a stale index
+           entry) is a benign skip; any other status (5xx, 429 rate-limit,
+           timeout) is a real failure of this filing. *)
+        if e.Net.status = 404
+        then (
+          Printf.eprintf "  skip %s: %s\n%!" job.index.accession (Net.show_error e);
+          Lwt.return Skipped)
+        else (
+          Printf.eprintf "  FAIL %s: %s\n%!" job.index.accession (Net.show_error e);
+          Lwt.return (Failed ("EDGAR: " ^ Net.show_error e)))
       | Store.Db s ->
         Printf.eprintf "  FAIL %s: database: %s\n%!" job.index.accession s;
         Lwt.return (Failed ("database: " ^ s))
@@ -292,7 +311,7 @@ let ingest_job_safe (store : Store.t) (job : job) : job_result Lwt.t =
 (* Per-day                                                              *)
 (* ------------------------------------------------------------------ *)
 
-let ingest_day (store : Store.t) (day : Date.t) : stats Lwt.t =
+let ingest_day ?(force = false) (store : Store.t) (day : Date.t) : stats Lwt.t =
   let cfg = store.Store.cfg in
   let stats = ref empty_stats in
   Lwt.bind (Edgar.filings_of_day cfg day) (fun filings ->
@@ -308,7 +327,7 @@ let ingest_day (store : Store.t) (day : Date.t) : stats Lwt.t =
           | Some index ->
             if Config.forms_allow cfg index.form
             then
-              Lwt.bind (ingest_job_safe store (make_job index)) (fun r ->
+              Lwt.bind (ingest_job_safe ~force store (make_job index)) (fun r ->
                 (match r with
                  | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
                  | Failed _ -> stats := { !stats with failed = !stats.failed + 1 }
@@ -333,7 +352,7 @@ let business_days (from : Date.t) (to_ : Date.t) : Date.t list =
   in
   go [] from
 
-let ingest_range (store : Store.t) (from : Date.t) (to_ : Date.t) : stats Lwt.t =
+let ingest_range ?(force = false) (store : Store.t) (from : Date.t) (to_ : Date.t) : stats Lwt.t =
   let days = business_days from to_ in
   let stats = ref empty_stats in
   let add (s : stats) =
@@ -349,7 +368,7 @@ let ingest_range (store : Store.t) (from : Date.t) (to_ : Date.t) : stats Lwt.t 
     (fun day ->
       Lwt.catch
         (fun () ->
-          Lwt.bind (ingest_day store day) (fun s ->
+          Lwt.bind (ingest_day ~force store day) (fun s ->
             Printf.eprintf "  %s  %s\n%!" (Date.to_string day) (show_stats s);
             add s;
             Lwt.return_unit))
@@ -473,7 +492,7 @@ let jobs_of_submissions (cfg : Config.t) (j : Yojson.Safe.t) : job list =
 
 (** Ingest the recent filings of one CIK. [?limit] bounds the number of
     filings (the most recent are first). *)
-let ingest_cik ?limit (store : Store.t) (cik : string) : stats Lwt.t =
+let ingest_cik ?limit ?(force = false) (store : Store.t) (cik : string) : stats Lwt.t =
   let cfg = store.Store.cfg in
   let stats = ref empty_stats in
   Lwt.bind (Edgar.submissions cfg cik) (fun j ->
@@ -484,7 +503,7 @@ let ingest_cik ?limit (store : Store.t) (cik : string) : stats Lwt.t =
     in
     Lwt_list.iter_s
       (fun job ->
-        Lwt.bind (ingest_job_safe store job) (fun r ->
+        Lwt.bind (ingest_job_safe ~force store job) (fun r ->
           (match r with
            | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
            | Failed _ -> stats := { !stats with failed = !stats.failed + 1 }

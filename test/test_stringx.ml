@@ -62,4 +62,28 @@ let tests : (string * unit T.test_case list) list =
         T.test_case "empty sub raises" `Quick (fun () ->
             T.match_raises "raises" Tcheck.failure_pred (fun () -> ignore (Stringx.replace "a" ~sub:"" ~by:"b")));
       ] );
+    (
+      "utf8_boundary_before / utf8_prefix",
+      [
+        T.test_case "backs off a split 2-byte character" `Quick (fun () ->
+            (* "abcde" + e-acute (C3 A9): byte 6 is the continuation byte
+               A9; the safe cut backs off to 5. *)
+            T.check T.int "mismatch" 5 (Stringx.utf8_boundary_before "abcde\xc3\xa9" 6));
+        T.test_case "backs off a split 3-byte character" `Quick (fun () ->
+            (* "abcd" + em dash (E2 80 94): byte 5 is a continuation byte;
+               the safe cut backs off to 4. *)
+            T.check T.int "mismatch" 4 (Stringx.utf8_boundary_before "abcd\xe2\x80\x94" 5));
+        T.test_case "no backoff at an ASCII boundary" `Quick (fun () ->
+            T.check T.int "mismatch" 3 (Stringx.utf8_boundary_before "abcdef" 3));
+        T.test_case "long multi-byte word: cut lands on a boundary" `Quick (fun () ->
+            let acc = String.concat "" (List.init 599 (fun _ -> "\xc3\xa9")) in
+            (* 1198 bytes; 101 is a continuation byte -> back off to 100. *)
+            T.check T.int "mismatch" 100 (Stringx.utf8_boundary_before acc 101));
+        T.test_case "prefix keeps whole characters" `Quick (fun () ->
+            let acc = String.concat "" (List.init 599 (fun _ -> "\xc3\xa9")) in
+            let expected = String.concat "" (List.init 50 (fun _ -> "\xc3\xa9")) in
+            T.check T.string "mismatch" expected (Stringx.utf8_prefix acc 101));
+        T.test_case "prefix shorter than n is unchanged" `Quick (fun () ->
+            T.check T.string "mismatch" "ab\xc3\xa9" (Stringx.utf8_prefix "ab\xc3\xa9" 10));
+      ] );
   ]

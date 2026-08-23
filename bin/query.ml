@@ -65,14 +65,7 @@ let meta (h : Store.hit) : string =
 let truncate s n =
   if String.length s <= n
   then s
-  else
-    (* UTF-8 continuation bytes are 10xxxxxx; a cut point [i] is valid iff
-       the byte at [i] starts a character (i.e. is not a continuation
-       byte). Back off from [n] to the nearest such point. *)
-    let is_cont c = (Char.code c land 0xC0) = 0x80 in
-    let i = ref n in
-    while !i > 0 && is_cont (String.get s !i) do decr i done;
-    String.sub s 0 !i ^ " […]"
+  else String.sub s 0 (Stringx.utf8_boundary_before s n) ^ " […]"
 
 (* ------------------------------------------------------------------ *)
 (* Structured ownership (SQL, not vectors)                            *)

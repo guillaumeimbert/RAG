@@ -32,6 +32,21 @@ let headers cfg =
 let headers_embed cfg =
   Net.json_headers ~auth:(Some cfg.Config.openai_embed_api_key) ()
 
+(** POST a JSON body to an inference endpoint and return the response body.
+    Every HTTP failure (429/5xx after the client retries are exhausted,
+    any 4xx, or a connection-level error) is reported as [Api_error] so a
+    caller can tell "the inference server is unavailable/misbehaving"
+    apart from an EDGAR fetch failure ([Net.Http_error], which only EDGAR
+    calls raise). This keeps a down inference server from being silently
+    classified as a benign skip.
+    @raise Api_error on any HTTP/connection failure. *)
+let post ~headers url ~body : string Lwt.t =
+  Lwt.catch
+    (fun () -> Net.post_json ~headers url ~body)
+    (function
+      | Net.Http_error e -> Lwt.fail (Api_error (Net.show_error e))
+      | e -> Lwt.fail e)
+
 let parse_json context s =
   match Yojson.Safe.from_string s with
   | j -> j
@@ -115,10 +130,10 @@ let chat ?system ?(temperature = 0.2) ~cfg (messages : message list) : string Lw
       ; "temperature", `Float temperature ]
   in
   Lwt.bind
-    (Net.post_json
-       ~headers:(headers cfg)
-       (cfg.Config.openai_base_url ^ "/chat/completions")
-       ~body:(Yojson.Safe.to_string payload))
+    ( post
+        ~headers:(headers cfg)
+        (cfg.Config.openai_base_url ^ "/chat/completions")
+        ~body:(Yojson.Safe.to_string payload) )
     (fun s -> Lwt.return (parse_chat_response s))
 
 (** Embed a batch of texts. Returns one vector per input, in input order.
@@ -134,10 +149,10 @@ let embed ~cfg (texts : string list) : (float list) list Lwt.t =
         ; "input", `List (List.map (fun t -> `String t) texts) ]
     in
     Lwt.bind
-      (Net.post_json
-         ~headers:(headers_embed cfg)
-         (cfg.Config.openai_embed_base_url ^ "/embeddings")
-         ~body:(Yojson.Safe.to_string payload))
+      ( post
+          ~headers:(headers_embed cfg)
+          (cfg.Config.openai_embed_base_url ^ "/embeddings")
+          ~body:(Yojson.Safe.to_string payload) )
       (fun s ->
         let vecs =
           parse_embeddings_response ~dim:cfg.Config.embedding_dim s

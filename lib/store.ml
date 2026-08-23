@@ -319,6 +319,46 @@ let upsert_holdings_q =
     |sql}
     syntax_off]
 
+(** Delete every row of one filing (accession) from a single store.
+    Connection-scoped so it composes inside [with_transaction]. Used by the
+    forced re-ingest path to clear stale rows before rewriting them. *)
+let delete_chunks_q =
+  [%rapper
+    execute
+    {sql| DELETE FROM chunks WHERE doc_id = %string{doc_id} |sql}
+    syntax_off]
+
+let delete_events_q =
+  [%rapper
+    execute
+    {sql| DELETE FROM ownership_events WHERE accession = %string{doc_id} |sql}
+    syntax_off]
+
+let delete_holdings_q =
+  [%rapper
+    execute
+    {sql| DELETE FROM holdings WHERE accession = %string{doc_id} |sql}
+    syntax_off]
+
+(** Delete every stored row of one filing (accession) from all three
+    stores, on an existing connection, returning a [result] so it composes
+    inside [with_transaction]. A filing always writes to a disjoint subset
+    of the stores (prose -> chunks, 13G/13D -> chunks+events, 13F ->
+    holdings), so deleting all three only touches the stores that filing
+    actually wrote. *)
+let delete_filing_on (conn : Caqti_lwt.connection) (doc_id : string) :
+    (unit, Caqti_error.t) result Lwt.t =
+  Lwt.bind (delete_chunks_q ~doc_id conn) (function
+    | Ok () ->
+      Lwt.bind (delete_events_q ~doc_id conn) (function
+        | Ok () ->
+          Lwt.bind (delete_holdings_q ~doc_id conn) (function
+            | Ok () -> Lwt.return (Ok ())
+            | Error _ as r -> Lwt.return r)
+        | Error _ as r -> Lwt.return r)
+    | Error _ as r -> Lwt.return r)
+
+
 (* ------------------------------------------------------------------ *)
 (* Structured retrieval (SQL, not vectors)                             *)
 (* ------------------------------------------------------------------ *)
@@ -533,8 +573,21 @@ let upsert_chunks_on (conn : Caqti_lwt.connection) (rows : chunk_row list) :
   in
   go (split_rows upsert_batch rows)
 
-let upsert_chunks t (rows : chunk_row list) : unit Lwt.t =
-  with_tx t (fun conn -> upsert_chunks_on conn rows)
+(** [upsert_chunks] stores chunk rows. With [~force:true] the document's
+    existing rows are deleted first, in the *same* transaction, so a
+    re-ingest fully replaces what was previously stored instead of leaving
+    stale rows behind. [doc_id] comes from the first row (all rows of one
+    filing share an accession); with an empty [rows] there is nothing to
+    replace, so the delete is skipped. *)
+let upsert_chunks ?(force = false) t (rows : chunk_row list) : unit Lwt.t =
+  let doc_id = (match rows with r :: _ -> r.doc_id | [] -> "") in
+  with_tx t (fun conn ->
+    if force && doc_id <> ""
+    then
+      Lwt.bind (delete_filing_on conn doc_id) (function
+        | Ok () -> upsert_chunks_on conn rows
+        | Error _ as r -> Lwt.return r)
+    else upsert_chunks_on conn rows)
 
 (** Vector search with optional metadata filters (empty/None = no filter). *)
 let search t ~query ~top_k ?(cik : string option = None) ?(form : string option = None) ?(ticker : string option = None) () :
@@ -570,6 +623,10 @@ let filing_exists t (doc_id : string) : bool Lwt.t =
       | Ok n -> Lwt.return (n > 0)
       | Error e -> Lwt.fail (Db (Caqti_error.show e)))
 
+(** Standalone: wipe one filing from all stores (its own transaction). *)
+let delete_filing t (doc_id : string) : unit Lwt.t =
+  with_tx t (fun conn -> delete_filing_on conn doc_id)
+
 (** Bulk upsert of ownership_events rows (13G/13D), same batching as
     [upsert_chunks]. *)
 let upsert_own_events_on (conn : Caqti_lwt.connection) (rows : own_event_row list) :
@@ -587,12 +644,28 @@ let upsert_own_events t (rows : own_event_row list) : unit Lwt.t =
   with_tx t (fun conn -> upsert_own_events_on conn rows)
 
 (** Store the ownership events AND the narrative chunks of one 13G/13D
-    filing in a single transaction: both are stored, or neither is. *)
-let upsert_13gd t (events : own_event_row list) (chunks : chunk_row list) : unit Lwt.t =
+    filing in a single transaction: both are stored, or neither is.
+    [~force:true] deletes the filing's existing rows first, in the same
+    transaction, so a re-ingest fully replaces them. *)
+let upsert_13gd ?(force = false) t (events : own_event_row list) (chunks : chunk_row list) : unit Lwt.t =
+  let doc_id =
+    (match events, chunks with
+     | e :: _, _ -> e.accession
+     | [], c :: _ -> c.doc_id
+     | [], [] -> "")
+  in
   with_tx t (fun conn ->
-    Lwt.bind (upsert_own_events_on conn events) (function
-      | Ok () -> upsert_chunks_on conn chunks
-      | Error _ as r -> Lwt.return r))
+    let write =
+      Lwt.bind (upsert_own_events_on conn events) (function
+        | Ok () -> upsert_chunks_on conn chunks
+        | Error _ as r -> Lwt.return r)
+    in
+    if force && doc_id <> ""
+    then
+      Lwt.bind (delete_filing_on conn doc_id) (function
+        | Ok () -> write
+        | Error _ as r -> Lwt.return r)
+    else write)
 
 (** Bulk upsert of holdings rows (13F positions). *)
 let upsert_holdings_on (conn : Caqti_lwt.connection) (rows : holding_row list) :
@@ -606,8 +679,18 @@ let upsert_holdings_on (conn : Caqti_lwt.connection) (rows : holding_row list) :
   in
   go (split_rows upsert_batch rows)
 
-let upsert_holdings t (rows : holding_row list) : unit Lwt.t =
-  with_tx t (fun conn -> upsert_holdings_on conn rows)
+(** Store 13F position rows. [~force:true] deletes the filing's existing
+    holdings first, in the same transaction, so a re-ingest fully replaces
+    them. *)
+let upsert_holdings ?(force = false) t (rows : holding_row list) : unit Lwt.t =
+  let doc_id = (match rows with r :: _ -> r.accession | [] -> "") in
+  with_tx t (fun conn ->
+    if force && doc_id <> ""
+    then
+      Lwt.bind (delete_filing_on conn doc_id) (function
+        | Ok () -> upsert_holdings_on conn rows
+        | Error _ as r -> Lwt.return r)
+    else upsert_holdings_on conn rows)
 
 (* ------------------------------------------------------------------ *)
 (* Structured retrieval                                                *)

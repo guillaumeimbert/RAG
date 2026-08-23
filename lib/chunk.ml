@@ -21,21 +21,18 @@ type block = {
 let head_cut s maxlen =
   if String.length s <= maxlen then s
   else
-    let cut =
+    let cut0 =
       let p = ref (min maxlen (String.length s - 1)) in
       while !p > 0 && String.get s !p <> ' ' && String.get s !p <> '\n' do
         decr p
       done;
       if !p = 0 then maxlen else !p
     in
-    (* The force-cut fallback may land inside a multi-byte character; back
-       off to the nearest character boundary. *)
-    let cut =
-      let c = ref cut in
-      while !c > 0 && (Char.code (String.get s !c) land 0xC0) = 0x80 do decr c done;
-      !c
-    in
-    String.sub s 0 cut
+    (* The cut (a word boundary, or the force-cut fallback) may land inside
+       a multi-byte character; back off to the nearest UTF-8 boundary so a
+       character is never split (a dangling lead byte would yield invalid
+       UTF-8 downstream). *)
+    String.sub s 0 (Stringx.utf8_boundary_before s cut0)
 
 (** Last [n] characters of [s] starting at a word boundary ("" when the
     tail is a single word or shorter than [n]). Trimmed. *)

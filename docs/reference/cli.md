@@ -18,14 +18,14 @@ Ingest all matching filings for one business day (`DATE` =
 `YYYY-MM-DD`). Weekend/holiday dates have no data and report zero
 documents.
 
-Options: `-e FILE`.
+Options: `-e FILE`, `-F, --force`.
 
 ### `ingest backfill --from DATE --to DATE`
 
 Ingest a range of business days, inclusive. Weekends are skipped
 directly; US market holidays have no sitemap and therefore no data. A `total` summary line is printed at the end.
 
-Options: `-e FILE`, `--from=DATE` (required), `--to=DATE` (required).
+Options: `-e FILE`, `--from=DATE` (required), `--to=DATE` (required), `-F, --force`.
 
 ### `ingest ticker TICKER`
 
@@ -34,13 +34,13 @@ Ingest the recent filings of one company, resolved from
 `unknown ticker` when the ticker is not in the file.
 
 Options: `-e FILE`, `-l N, --limit=N` (default `0` = all recent
-filings).
+filings), `-F, --force`.
 
 ### `ingest cik CIK`
 
 Same as `ticker`, by CIK (10-digit or unpadded).
 
-Options: `-e FILE`, `-l N, --limit=N`.
+Options: `-e FILE`, `-l N, --limit=N`, `-F, --force`.
 
 ### `ingest stats`
 
@@ -54,6 +54,15 @@ ownership events: <n>
 ```
 
 Options: `-e FILE`.
+
+### `--force` / `-F`
+
+Bypass the "already ingested" check and replace the stored rows for
+each filing (an atomic delete-then-write per accession). Use it to
+repair or rebuild filings that are already in the store — for example
+after a parser or embedding-model change. Applies to `day`,
+`backfill`, `ticker`, and `cik`. A run with a non-zero `failed` count
+exits `123` (error), so a failed ingest is never reported as success.
 
 ## query.exe
 

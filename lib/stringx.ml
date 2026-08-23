@@ -65,3 +65,23 @@ let replace s ~sub ~by =
   done;
   if !pos < l then Buffer.add_string buf (String.sub s !pos (l - !pos));
   Buffer.contents buf
+
+(** [utf8_boundary_before s n] = the greatest index [i <= min (n, length s)]
+    at which a UTF-8 character begins, i.e. the safe cut point to truncate
+    [s] to a prefix without splitting a multi-byte character. A cut point
+    [i] is valid iff the byte at [i] is a *lead* byte (not a UTF-8
+    continuation byte [10xxxxxx]); the function backs off from [n] to the
+    nearest such point. (End-of-string and byte 0 are valid boundaries.) *)
+let utf8_boundary_before (s : string) (n : int) : int =
+  let i = ref (min n (String.length s)) in
+  while !i > 0 && (Char.code (String.get s !i) land 0xC0) = 0x80 do
+    decr i
+  done;
+  !i
+
+(** [utf8_prefix s n] = [s] cut to a prefix of at most [n] bytes on a
+    UTF-8 character boundary (no multi-byte character is split). *)
+let utf8_prefix (s : string) (n : int) : string =
+  if String.length s <= n
+  then s
+  else String.sub s 0 (utf8_boundary_before s n)
