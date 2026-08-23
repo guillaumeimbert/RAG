@@ -137,13 +137,18 @@ let parse_master (body : string) : master_row list =
     once per related CIK). Each [filing.index_url] is the index page on
     [sec_archives_base]. This is where the pre-filter happens: ~3,000
     rows/day shrink to the few hundred allow-listed ones before any index
-    page is requested. *)
+    page is requested. 13F amendments (13F-HR/A) are discarded here even
+    when allow-listed: they are deliberately unsupported (see
+    [Ownership.is_13f_amendment]), so dropping them before the index download
+    avoids an unnecessary fetch that the ingest guard would skip anyway. *)
 let master_filings cfg (rows : master_row list) : filing list =
   let seen = Hashtbl.create 1024 in
   let out = ref [] in
   List.iter
     (fun r ->
-      if Config.forms_allow cfg r.form_type && not (Hashtbl.mem seen r.accession)
+      if Config.forms_allow cfg r.form_type
+         && not (Ownership.is_13f_amendment r.form_type)
+         && not (Hashtbl.mem seen r.accession)
       then
         ( Hashtbl.add seen r.accession ();
           out

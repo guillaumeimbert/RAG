@@ -98,8 +98,9 @@ Constraints/indexes: `UNIQUE (accession, event_index)`; B-tree on
 One row per position in a 13F information table, keyed by the row's XML
 ordinal ([`accession`, `position_index`]). A single 13F can legitimately
 list the same (cusip, class, SH/PRN) more than once — separate lots, positions
-reported for other managers, and put/call splits — each as its own row. An
-amendment re-files the full table under a new accession.
+reported for other managers, and put/call splits — each as its own row. 13F
+amendments (13F-HR/A) are not ingested (see below), so one accession is always
+a single original 13F filing.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -128,11 +129,26 @@ summing value and shares across lots — before picking the latest report per
 filer.
 
 13F **amendments** (13F-HR/A) are not supported and are skipped at ingest.
-An amendment may *supplement* (rather than restate) the original, and the
-retrieval keeps a single latest report per filer; storing an additive
-amendment would therefore drop the original positions. The original filing
-remains the authoritative (complete) snapshot. The default `FORMS` excludes
-amendments, so this only matters when `FORMS=ALL` or `13F-HR/A` is enabled.
+The SEC Cover Page distinguishes two kinds (Form 13F FAQ): a *restatement*
+resubmits and supersedes the complete original, while an *additive* amendment
+supplements it (listing only the positions that changed or were added).
+Storing both correctly would mean supersede-on-restatement and merge-on-
+additive; that is out of scope, so 13F amendments are never stored. Two
+consequences to be aware of:
+
+- The stored report is the **original filing only** — not a guaranteed-complete
+  current snapshot once an amendment has been filed. A restatement makes the
+  stored original stale; an additive amendment leaves it incomplete.
+- The pre-filter (discovery) discards 13F amendments before any index download
+  even when they are allow-listed, and the ingest guard skips them before their
+  cover / information table. **Rows from amendments ingested before this
+  support landed are NOT automatically removed** and, if newer than the
+  original, can still win the per-filer `latest_accession` selection — a
+  restatement would then drop original positions and an additive amendment
+  would show an incomplete holding. If you ever ingested with `FORMS=ALL` or an
+  explicit `13F-HR/A`, re-ingest the affected days with `--force` (or reset the
+  store) so only original filings are present. The default `FORMS` excludes
+  amendments, so this only concerns non-default configurations.
 
 ## Query conventions
 

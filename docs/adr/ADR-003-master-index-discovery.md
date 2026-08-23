@@ -77,13 +77,18 @@ For `master.20260820.idx` vs `sitemap.20260820.xml`:
 2. **Pre-filter** = apply `FORMS` to the master's `Form Type`
    **before** fetching any index page. Rows that do not match are dropped;
    only allow-listed accessions have their index page fetched (to read
-   `primaryDocument` and any per-filing metadata the master lacks).
+   `primaryDocument` and any per-filing metadata the master lacks). 13F
+   amendments (13F-HR/A) are dropped here even when allow-listed — they are
+   deliberately unsupported (neither a restatement nor an additive amendment
+   is interpreted), so the pre-filter avoids an index download that the ingest
+   guard would skip anyway.
 3. **Dedupe** = by accession (first occurrence wins), because the master lists
    the same accession under each related CIK.
 4. **Safety net** = after fetching an allow-listed filing's index page, the
    pipeline re-checks the index page's own form against `FORMS` (the master's
-   `Form Type` and the index page can in principle disagree, e.g. for
-   amendments). A disagreement drops the filing.
+   `Form Type` and the index page can in principle disagree, e.g. for a
+   non-13F amendment). A disagreement drops the filing. (13F amendments never
+   reach this: the pre-filter drops them before the index fetch.)
 5. **No sitemap fallback.** The sitemap and the master are published together
    per business day; a 404 on the master means a holiday/non-business day
    (exactly as a 404 on the sitemap did). `master_of_day` raises `Failure` on

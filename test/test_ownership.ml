@@ -188,4 +188,22 @@ let tests : (string * unit T.test_case list) list =
             T.check T.bool "None" true
               (Option.is_none (Ownership.validate_positions None None p)));
       ] );
+    (
+      "is_13f_amendment",
+      [
+        T.test_case "13F-HR/A is an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" true (Ownership.is_13f_amendment "13F-HR/A"));
+        T.test_case "SCHEDULE 13F-HR/A (prefixed) is an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" true (Ownership.is_13f_amendment "SCHEDULE 13F-HR/A"));
+        T.test_case "13F-STR/A (short-form amendment) is an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" true (Ownership.is_13f_amendment "13F-STR/A"));
+        T.test_case "13F-HR (the original) is not an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" false (Ownership.is_13f_amendment "13F-HR"));
+        T.test_case "13F-STR is not an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" false (Ownership.is_13f_amendment "13F-STR"));
+        T.test_case "10-K/A (a non-13F amendment) is not a 13F amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" false (Ownership.is_13f_amendment "10-K/A"));
+        T.test_case "13G/A (a non-13F amendment) is not a 13F amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" false (Ownership.is_13f_amendment "13G/A"));
+      ] );
   ]

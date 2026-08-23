@@ -170,6 +170,15 @@ let is_amendment_of (form : string) : bool =
   let f = norm_form form in
   Stringx.ends_with f ~suffix:"/A"
 
+(** True for a 13F amendment: a 13F form (13F-HR, 13F-STR, ...) whose
+    normalized name ends in "/A" (e.g. 13F-HR/A). 13F amendments are not
+    ingested — a *restatement* supersedes the complete original while an
+    *additive* amendment supplements it (the SEC Cover Page distinguishes the
+    two; see the Form 13F FAQ), and neither is interpreted here. Shared by the
+    discovery pre-filter ([Edgar]) and the ingest guard ([Pipeline]). *)
+let is_13f_amendment (form : string) : bool =
+  classify form = Form13f && is_amendment_of form
+
 (* Common 13D/13G scaffolding: the header carries the filer, the
     cover page the event date, class and issuer. Element spellings
     differ (13D: issuerCIK / dateOfEvent; 13G: issuerCik /

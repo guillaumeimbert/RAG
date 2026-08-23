@@ -300,5 +300,29 @@ let tests : (string * unit T.test_case list) list =
             let cfg = F.cfg_for "http://sec" (fun c -> { c with Config.forms = ["20-F"] }) in
             let rows = F.read_text (F.fix "master.idx") |> Edgar.parse_master in
             T.check T.int "none" 0 (List.length (Edgar.master_filings cfg rows)));
+        T.test_case "13F amendment is dropped even when allow-listed (ALL)" `Quick (fun () ->
+            let cfg = F.cfg_for "http://sec" (fun c -> { c with Config.forms = ["ALL"] }) in
+            let mk (acc : string) (form : string) : Edgar.master_row =
+              { cik = "1045810"; company = "NVIDIA CORP"; form_type = form; date = "20260820"; accession = acc }
+            in
+            let rows =
+              [ mk "0001045810-26-000065" "13F-HR"; mk "0001045810-26-000066" "13F-HR/A" ]
+            in
+            let fs = Edgar.master_filings cfg rows in
+            T.check T.int "only the original 13F-HR survives" 1 (List.length fs);
+            T.check T.string "the original accession" "0001045810-26-000065"
+              (List.hd (List.map (fun (f : Edgar.filing) -> f.Edgar.accession) fs)));
+        T.test_case "13F amendment dropped even when explicitly allow-listed" `Quick (fun () ->
+            let cfg = F.cfg_for "http://sec" (fun c -> { c with Config.forms = ["13F-HR"; "13F-HR/A"] }) in
+            let mk (acc : string) (form : string) : Edgar.master_row =
+              { cik = "1045810"; company = "NVIDIA CORP"; form_type = form; date = "20260820"; accession = acc }
+            in
+            let rows =
+              [ mk "0001045810-26-000065" "13F-HR"; mk "0001045810-26-000066" "13F-HR/A" ]
+            in
+            let fs = Edgar.master_filings cfg rows in
+            T.check T.int "only the original 13F-HR survives" 1 (List.length fs);
+            T.check T.string "the original accession" "0001045810-26-000065"
+              (List.hd (List.map (fun (f : Edgar.filing) -> f.Edgar.accession) fs)));
       ] );
   ]

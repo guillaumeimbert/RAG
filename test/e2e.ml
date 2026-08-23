@@ -95,6 +95,12 @@ let master_idx_e2e_ownership =
    mock handler runs in its own thread, so the list is guarded by a mutex. *)
 let edgar_index_requests : string list ref = ref []
 let edgar_index_mu = Mutex.create ()
+(* All EDGAR archive requests (index pages AND the cover / information-table
+   documents). Used to prove that a skipped filing made NO archive fetch at
+   all (the discovery pre-filter discards 13F amendments before any download,
+   and the ingest guard skips an amendment before its cover / table). *)
+let edgar_archive_requests : string list ref = ref []
+let edgar_archive_mu = Mutex.create ()
 let is_index_path (path : string) =
   let suf = "-index.htm" in
   let n = String.length path in
@@ -104,6 +110,10 @@ let record_index_request (path : string) =
   Mutex.lock edgar_index_mu;
   edgar_index_requests := path :: !edgar_index_requests;
   Mutex.unlock edgar_index_mu
+let record_archive_request (path : string) =
+  Mutex.lock edgar_archive_mu;
+  edgar_archive_requests := path :: !edgar_archive_requests;
+  Mutex.unlock edgar_archive_mu
 (* Drain the recorded index-page requests (oldest first) and reset the list,
    so a test inspects exactly the requests made in its own window. *)
 let drain_index_requests () =
@@ -111,6 +121,13 @@ let drain_index_requests () =
   let xs = List.rev !edgar_index_requests in
   edgar_index_requests := [];
   Mutex.unlock edgar_index_mu;
+  xs
+(* Same, for the archive requests. *)
+let drain_archive_requests () =
+  Mutex.lock edgar_archive_mu;
+  let xs = List.rev !edgar_archive_requests in
+  edgar_archive_requests := [];
+  Mutex.unlock edgar_archive_mu;
   xs
 
 (** Rewrite every vector(N) / halfvec(N) type in the schema to use [dim], so
@@ -271,11 +288,17 @@ let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
     html (fixture "13g_index.html")
   | "/Archives/edgar/data/1045810/0001045810-26-000065-index.htm" ->
     html (fixture "13f_index.html")
-  (* 13F amendment (not supported): the index page is fetched (the form is
-     allow-listed so the pre-filter passes) but the job is skipped before any
-     rows are stored, so the accession never reaches the holdings table. *)
+  (* 13F amendment (not supported): the discovery pre-filter discards it
+     BEFORE the index download, so this route is only a regression guard. If
+     the pre-filter regressed, the index would be served (a genuine 13F-HR/A
+     page, so the parsed form is the amended one), and the ingest guard would
+     still skip it before the cover / information table. *)
   | "/Archives/edgar/data/1045810/0001045810-26-000066-index.htm" ->
-    html (fixture "13f_index.html")
+    html (fixture "13f_amendment_index.html")
+  | "/Archives/edgar/data/1045810/000104581026000066/primary_doc.xml" ->
+    xml (fixture "13f_nvda_primary.xml")
+  | "/Archives/edgar/data/1045810/000104581026000066/infotable.xml" ->
+    xml (fixture "13f_nvda_table.xml")
   | "/Archives/edgar/data/1045810/000104581026000065/primary_doc.xml" ->
     xml (fixture "13f_nvda_primary.xml")
   | "/Archives/edgar/data/1045810/000104581026000065/infotable.xml" ->
@@ -318,6 +341,7 @@ let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
 
 let edgar_handler (path : string) (_body : string) : Mock.resp option =
   if is_index_path path then record_index_request path;
+  if Stringx.starts_with path ~prefix:"/Archives/" then record_archive_request path;
   (match !edgar_fault with
   | Some code ->
     Some { Mock.code = code; content_type = "text/html"; body = "fault-injected" }
@@ -1651,15 +1675,18 @@ let () =
           with Config.database_url =
             Printf.sprintf "postgresql://%s:%s@%s:%d/%s" pg_user pg_pass pg_host pg_port
               own_db;
-              (* Include the 13F amendment so the pre-filter passes it to the
-                 ingest job, which must then SKIP it (the amendment guard).
-                 Without this the master pre-filter would drop it before the
-                 guard is ever exercised. *)
+              (* Explicitly allow-list the 13F amendment: the discovery
+                 pre-filter must STILL discard it (13F amendments are
+                 unsupported regardless of FORMS). This is exactly what the
+                 "no archive request" assertion below checks — without this
+                 the pre-filter's FORMS branch would drop it and the test
+                 would not prove the amendment-specific branch fires. *)
           Config.forms = [ "10-K"; "10-Q"; "8-K"; "13F-HR"; "13F-HR/A"; "13G" ];
         }
       in
       let ostore = Lwt_main.run (Store.create ocfg) in
       ignore (drain_index_requests ());  (* clear any prior windows *)
+      ignore (drain_archive_requests ());
       let so = Lwt_main.run (Pipeline.ingest_day ostore (Date.of_string "2026-08-21")) in
       Printf.printf "  ingest_day (ownership) %s\n%!" (Pipeline.show_stats so);
       check "ingest_day (ownership): both 13G and 13F ingested" (so.Pipeline.docs = 2);
@@ -1669,17 +1696,31 @@ let () =
       check "ingest_day (ownership): 13F positions stored (index-named info table resolved)"
         (so.Pipeline.positions = 8);
       let own_reqs = drain_index_requests () in
+      let own_arch = drain_archive_requests () in
       let oreq p = List.mem p own_reqs in
       check "ingest_day (ownership): 13G index page fetched"
         (oreq "/Archives/edgar/data/1045810/0001045810-26-000062-index.htm");
       check "ingest_day (ownership): 13F index page fetched"
         (oreq "/Archives/edgar/data/1045810/0001045810-26-000065-index.htm");
-      (* 13F amendment (13F-HR/A) is allow-listed above so the pre-filter
-         passes it, but the ingest job SKIPS it: the index page is fetched
-         (proving it reached the job) yet no rows are stored. A stored
-         additive amendment would otherwise drop the original positions. *)
-      check "ingest_day (ownership): 13F amendment index page fetched"
-        (oreq "/Archives/edgar/data/1045810/0001045810-26-000066-index.htm");
+      (* 13F amendment (13F-HR/A): the discovery pre-filter discards it
+         BEFORE any download, so NO archive request (index, cover, or
+         information table) is made for its accession. It is allow-listed in
+         the ocfg above precisely to prove the pre-filter's amendment branch
+         fires (not just its FORMS branch). The index route serves a genuine
+         13F-HR/A page, so if the pre-filter regressed the index would be
+         fetched (parsed form = 13F-HR/A) and the ingest guard would have to
+         skip it. *)
+      let amend_paths =
+        [
+          "/Archives/edgar/data/1045810/0001045810-26-000066-index.htm";
+          "/Archives/edgar/data/1045810/000104581026000066/primary_doc.xml";
+          "/Archives/edgar/data/1045810/000104581026000066/infotable.xml";
+        ]
+      in
+      check "ingest_day (ownership): 13F amendment makes no archive request (pre-filtered before download)"
+        (List.for_all (fun p -> not (List.mem p own_arch)) amend_paths);
+      check "ingest_day (ownership): 13F amendment index page NOT fetched (pre-filtered)"
+        (not (oreq "/Archives/edgar/data/1045810/0001045810-26-000066-index.htm"));
       let amendment_holdings =
         (match
            pg_query own_db

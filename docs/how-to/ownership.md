@@ -79,12 +79,13 @@ Tips:
   the query keeps the latest per filer).
 - **13F-HR**: quarterly institutional holdings — one row per
   (filer, position) in the latest report. 13F **amendments**
-  (13F-HR/A) are not supported: an amendment may supplement (rather than
-  restate) the original, and the retrieval keeps only one report per filer,
-  so a stored additive amendment would drop the original positions. They
-  are skipped at ingest (the original filing stays the authoritative
-  snapshot); the default `FORMS` already excludes them.
+  (13F-HR/A) are not supported: a *restatement* supersedes the original
+  while an *additive* amendment supplements it, and neither is interpreted,
+  so the amendment is skipped at ingest and the stored report is the original
+  filing only (not a guaranteed-complete current snapshot after an amendment
+  is filed). The default `FORMS` already excludes them.
 
 Not covered (v1): Forms 3/4/5 (insider transactions), 13F issuer
-identification beyond name-matching, 13F-HR/A amendments, and 13D
-multi-person groups are flattened to one row per person.
+identification beyond name-matching, interpreting 13F-HR/A amendments
+(they are skipped rather than stored), and 13D multi-person groups are
+flattened to one row per person.

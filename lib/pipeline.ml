@@ -306,21 +306,18 @@ let ingest_13f ?force (store : Store.t) (job : job) : job_result Lwt.t =
         Lwt.bind (Store.upsert_holdings ?force store index.accession rows) (fun () ->
           Lwt.return (Ingested { chunks = 0; events = 0; positions = List.length rows })))))
 
-(** A 13F-HR/A (or any "/A"-suffixed 13F variant) is an amendment. The
-    retrieval treats each accession as a filer's standalone "latest report",
-    so an *additive* amendment — one that supplements rather than restates
-    the original — would, if stored, be picked as the filer's latest report
-    and would omit the original positions. We cannot reliably tell an
-    additive amendment from a full restatement (the SEC does not flag the
-    type), so 13F amendments are not stored: the original filing remains the
-    authoritative (complete) snapshot. The default FORMS excludes amendments,
-    so this only fires when the user opts in (FORMS=ALL or an explicit
-    13F-HR/A). *)
-let is_13f_amendment (form : string) : bool =
-  Ownership.classify form = Ownership.Form13f
-  && Stringx.ends_with (Ownership.norm_form form) ~suffix:"/A"
-
-(** Route one filing to its pipeline by form class. *)
+(** [ingest_job] routes one filing to its pipeline by form class (prose /
+    13G-13D / 13F). 13F amendments are skipped before storage: the SEC Cover
+    Page distinguishes two kinds (Form 13F FAQ) — a *restatement* resubmits
+    and supersedes the complete original, while an *additive* amendment
+    supplements it (listing only the positions that changed or were added).
+    Storing both correctly would mean supersede-on-restatement and
+    merge-on-additive; that is out of scope here, so 13F amendments are not
+    stored at all. The stored report is therefore the original filing only —
+    NOT a guaranteed-complete current snapshot once an amendment has been
+    filed (a restatement makes it stale, an additive amendment leaves it
+    incomplete). The default FORMS excludes amendments, so this only fires
+    when the user opts in (FORMS=ALL or an explicit 13F-HR/A). *)
 let ingest_job ?(force = false) (store : Store.t) (job : job) : job_result Lwt.t =
   let cfg = store.Store.cfg in
   let doc_id = job.index.accession in
@@ -332,10 +329,10 @@ let ingest_job ?(force = false) (store : Store.t) (job : job) : job_result Lwt.t
   in
   if Config.forms_allow cfg job.index.form = false
   then Lwt.return Skipped
-  else if is_13f_amendment job.index.form
+  else if Ownership.is_13f_amendment job.index.form
   then (
     Printf.eprintf
-      "  skip %s: 13F amendment (%s) not supported — an additive amendment would drop the original positions; the original filing remains the authoritative snapshot\n%!"
+      "  skip %s: 13F amendment (%s) not supported — a restatement or an additive amendment is not interpreted, so the stored original may be stale or incomplete after the amendment\n%!"
       doc_id job.index.form;
     Lwt.return Skipped)
   else
