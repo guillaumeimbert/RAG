@@ -47,8 +47,9 @@ never breaks a local `dune runtest` while the database is down. Set
 RAG_E2E_REQUIRE_PG=1 ./_build/default/test/e2e.exe
 ```
 
-CI (`.github/workflows/ci.yml`) provides a `pgvector/pgvector:pg17`
-service and sets `RAG_E2E_REQUIRE_PG=1`, so the e2e test can never
+CI (`.github/workflows/ci.yml`) provides a `pgvector/pgvector:0.8.6-pg17`
+service (the same tested release the compose file pins) and sets
+`RAG_E2E_REQUIRE_PG=1`, so the e2e test can never
 silently skip there — a missing database fails the build.
 
 ### The CLI exit-code subtest

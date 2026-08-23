@@ -10,11 +10,12 @@
 
 services:
   db:
-    # Floating tag: always the newest pgvector built for Postgres 17. The
-    # application checks the installed pgvector version at startup (it must be
-    # >= 0.8.0 for hnsw.iterative_scan) and fails fast otherwise. Pin an
-    # explicit version tag (e.g. 0.8.0-pg17) for reproducible builds.
-    image: pgvector/pgvector:pg17
+    # Pinned to a tested release, not a floating tag: 0.8.6 is the current
+    # pgvector patch release (several releases since the 0.8.0 minimum contain
+    # HNSW correctness and maintenance fixes) and 0.8.6-pg17 is its official
+    # Postgres 17 image tag. The startup check still enforces >= 0.8.0 (the
+    # iterative-scan feature requirement) independently of this deployment pin.
+    image: pgvector/pgvector:0.8.6-pg17
     # Explicit name so it never collides with other local stacks
     # (podman-compose otherwise derives "rag_db_1" from this directory name).
     container_name: raguesslighter-db

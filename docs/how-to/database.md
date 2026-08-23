@@ -5,7 +5,7 @@ container on the host network (it reaches the same `localhost:5432`
 the app uses):
 
 ```sh
-podman run --rm --network host pgvector/pgvector:pg17 psql \
+podman run --rm --network host pgvector/pgvector:0.8.6-pg17 psql \
   "postgresql://raguesslighter:raguesslighter@127.0.0.1:5432/raguesslighter"
 ```
 
@@ -13,7 +13,7 @@ podman run --rm --network host pgvector/pgvector:pg17 psql \
 one-off queries append `-c "SELECT …"`:
 
 ```sh
-podman run --rm --network host pgvector/pgvector:pg17 psql \
+podman run --rm --network host pgvector/pgvector:0.8.6-pg17 psql \
   "postgresql://raguesslighter:raguesslighter@127.0.0.1:5432/raguesslighter" \
   -c "SELECT company, form, count(*) FROM chunks GROUP BY 1, 2 ORDER BY 3 DESC;"
 ```
@@ -166,10 +166,11 @@ checks the installed extension version at startup (`Store.create`) and fails
 fast if it is missing or older than 0.8.0. The e2e suite repeats the same
 check.
 
-Note: the compose file uses the **floating** tag `pgvector/pgvector:pg17`
-(always the newest pgvector built for Postgres 17), so the version is not
-fixed by the image reference — the startup check is what keeps the
-requirement honest. Pin an explicit version tag (e.g.
-`pgvector/pgvector:0.8.0-pg17`) if you need reproducible builds. pgvector's
-tags are version-first (the pgvector version, then the Postgres major), so
-`0.8.0-pg17` is valid while `pg17-0.8.0` is not.
+Note: the compose file (and CI) pin a specific tested release,
+`pgvector/pgvector:0.8.6-pg17`, rather than the floating `pg17` tag, so
+local and CI builds are reproducible. The pin is the newest released patch
+(0.8.6), not the 0.8.0 minimum — several releases since 0.8.0 contain
+relevant HNSW correctness and maintenance fixes — while the startup check
+still enforces the actual feature requirement (≥ 0.8.0) independently.
+pgvector's tags are version-first (the pgvector version, then the Postgres
+major), so `0.8.6-pg17` is valid while `pg17-0.8.6` is not.

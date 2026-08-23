@@ -9,11 +9,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     services:
-      # pgvector-backed PostgreSQL 17. e2e connects as user
-      # "raguesslighter" to the "raguesslighter" database on 127.0.0.1:5432
-      # and creates a scratch database of its own.
+      # pgvector-backed PostgreSQL 17, pinned to the same tested release as
+      # compose.yaml (0.8.6) so CI and local dev use the same pgvector.
+      # e2e connects as user "raguesslighter" to the "raguesslighter"
+      # database on 127.0.0.1:5432 and creates a scratch database of its own.
       db:
-        image: pgvector/pgvector:pg17
+        image: pgvector/pgvector:0.8.6-pg17
         env:
           POSTGRES_USER: raguesslighter
           POSTGRES_PASSWORD: raguesslighter
