@@ -438,6 +438,17 @@ let () =
                    Store.upsert_chunks store "sem-lease"
                      [ sem_chunk "sem-lease" "The operating lease for office 12 was renewed." (unit_vec 2) ])))
       in
+      (* Antipodal control: a chunk pointing exactly opposite to the revenue
+         vector has cosine similarity -1.0 to it. With the default (disabled)
+         threshold the store must still return it, proving MIN_SIMILARITY=0.0
+         disables the filter rather than acting as a zero floor that would drop
+         every negative-scoring hit. *)
+      let () =
+        Lwt_main.run
+          (Store.upsert_chunks store "sem-anti"
+             [ sem_chunk "sem-anti" "Control chunk pointing opposite the revenue vector."
+                 (List.init embed_dim (fun j -> if j = 0 then -1.0 else 0.0)) ])
+      in
       let rev_hits =
         Lwt_main.run (Store.search store ~query:(Store.vector_to_string (unit_vec 0)) ~top_k:3 ~cik:(Some "999") ())
       in
@@ -476,6 +487,23 @@ let () =
       in
       check "threshold: a relevant query still passes the threshold"
         (match rev_thr with | h :: _ -> h.Store.doc_id = "sem-revenue" | [] -> false);
+
+      (* The antipodal hit (similarity -1.0) is the regression guard for
+         "0.0 disables rather than floors at zero": the default threshold keeps
+         it; a positive threshold drops it. *)
+      let anti_default =
+        Lwt_main.run (Store.search store ~query:(Store.vector_to_string (unit_vec 0)) ~top_k:4 ~cik:(Some "999") ())
+      in
+      check "threshold: a disabled (0.0) threshold keeps a negative-similarity (antipodal) hit"
+        (match List.find_opt (fun (h : Store.hit) -> h.Store.doc_id = "sem-anti") anti_default with
+         | Some h -> h.Store.similarity < -0.99
+         | None -> false);
+      let anti_thr =
+        Lwt_main.run
+          (Store.search store ~query:(Store.vector_to_string (unit_vec 0)) ~top_k:4 ~cik:(Some "999") ~min_similarity:0.5 ())
+      in
+      check "threshold: a positive threshold drops the negative-similarity (antipodal) hit"
+        (List.find_opt (fun (h : Store.hit) -> h.Store.doc_id = "sem-anti") anti_thr = None);
 
       (* 4e. structured retrieval: latest-event-per-filer selection, previous
          event deltas, multiple filers, and amendment handling. Insert a known
@@ -833,11 +861,13 @@ let () =
         (List.length all_chunks > 0 && List.for_all clean all_chunks);
 
       (* the database enforces the nonempty invariant too: a whitespace-only
-         chunk is rejected by the CHECK constraint and never stored. *)
+         chunk is rejected by the CHECK constraint and never stored. The text
+         mixes tabs, newlines and spaces on purpose: a btrim (spaces-only)
+         check would accept it, so this pins down the POSIX [:space:] fix. *)
       let ws_chunk =
         { Store.doc_id = "sem-ws"; company = "SEM"; cik = "999"; ticker = ""; form = "10-K"
         ; filed_at = "2026-01-01"; section = "s"; chunk_index = 0
-        ; text = "   "; embedding = Store.vector_to_string (unit_vec 0) }
+        ; text = "\t\n \t"; embedding = Store.vector_to_string (unit_vec 0) }
       in
       let ws_rejected = ref false in
       let () =

@@ -156,8 +156,16 @@ let load ?(env_file = ".env") () : t =
     min_similarity =
       (match E.get e "MIN_SIMILARITY" with
        | Some v ->
-         (try float_of_string v
-          with Failure _ -> failwith ("MIN_SIMILARITY must be a float, got '" ^ v ^ "'"))
+         (match (try Some (float_of_string v) with Failure _ -> None) with
+          | None -> failwith ("MIN_SIMILARITY must be a number, got '" ^ v ^ "'")
+          | Some x ->
+            (* float_of_string accepts NaN, inf and any magnitude, but the
+                floor is only meaningful within the cosine-similarity range
+                [0, 1]; reject everything else. NaN fails both comparisons
+                and inf > 1.0, so the single range test rejects them all. *)
+            (if not (x >= 0.0 && x <= 1.0)
+             then failwith ("MIN_SIMILARITY must be within [0, 1], got " ^ v)
+             else x))
        | None -> 0.0);
   }
 

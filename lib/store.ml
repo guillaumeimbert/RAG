@@ -107,7 +107,13 @@ type hit = {
     work (ORDER BY distance LIMIT top_k); the outer query then drops any hit
     whose cosine similarity falls below [min_similarity], so a nonsense or
     unrelated query returns NOTHING rather than the nearest top_k however bad
-    they are. [min_similarity] = 0.0 disables the filter (default behaviour). *)
+    they are.
+
+    [min_similarity] = 0.0 DISABLES the filter: cosine similarity ranges over
+    [-1, 1], so a plain `similarity >= 0.0` would silently drop every
+    negative-scoring (anti-parallel) hit. 0.0 is therefore special-cased so the
+    default behaviour returns the nearest top_k regardless of sign. Any other
+    value (including negative ones) is applied as a literal floor. *)
 let search_q =
   [%rapper
     get_many
@@ -142,7 +148,8 @@ let search_q =
         ORDER BY embedding <=> %string{q}::vector
         LIMIT %int{top_k}
       ) ranked
-      WHERE ranked.similarity >= %float{min_similarity}
+      WHERE (%float{min_similarity} = 0.0
+             OR ranked.similarity >= %float{min_similarity})
       ORDER BY ranked.similarity DESC
     |sql}
     record_out syntax_off]

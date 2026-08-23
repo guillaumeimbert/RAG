@@ -36,13 +36,24 @@ SELECT max(created_at) FROM chunks;
 ## Apply a new schema file to an existing database
 
 `schema/*.sql` runs automatically **only on first initialization**
-(empty data volume). On a database that already has data, apply new
-files by hand — they are written idempotent (`IF NOT EXISTS`):
+(empty data volume). On a database that already has data, apply the
+files you have not yet run by hand, **in order** — they are written
+idempotent (`IF NOT EXISTS`), so re-running one is harmless:
 
 ```sh
+# e.g. after adding schema/0003_chunk_quality.sql to an existing store:
 podman compose exec -T db psql -U raguesslighter -d raguesslighter \
-  < schema/0002_ownership.sql
+  < schema/0003_chunk_quality.sql
+
+# verify the chunk-text constraint is now present:
+podman compose exec -T db psql -U raguesslighter -d raguesslighter \
+  -tAc "SELECT conname FROM pg_constraint WHERE conname = 'chunks_text_nonempty';"
 ```
+
+(`0003_chunk_quality.sql` is also *corrective*: if an earlier space-only
+`btrim` version of the check is present it is replaced by the
+`[^[:space:]]` regex, so the command above converges on the right
+constraint either way.)
 
 ## Reset the store
 
@@ -55,6 +66,7 @@ DROP TABLE IF EXISTS holdings CASCADE;
 -- then re-run the schema files:
 \i /docker-entrypoint-initdb.d/0001_init.sql
 \i /docker-entrypoint-initdb.d/0002_ownership.sql
+\i /docker-entrypoint-initdb.d/0003_chunk_quality.sql
 ```
 
 Or nuke everything including the volume (destructive):

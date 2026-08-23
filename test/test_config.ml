@@ -25,6 +25,12 @@ let required_body =
   ^ "CHUNK_OVERLAP=120\n"
   ^ "TOP_K=5\n"
 
+(** Load a config with [MIN_SIMILARITY] set to [v]; returns a thunk that reads
+    the parsed [min_similarity]. Invalid [v] make the thunk raise. *)
+let min_similarity_of (v : string) : unit -> float =
+  let p = write_env (required_body ^ "MIN_SIMILARITY=" ^ v ^ "\n") in
+  fun () -> (Config.load ~env_file:p ()).Config.min_similarity
+
 let tests : (string * unit T.test_case list) list =
   [
     (
@@ -94,6 +100,29 @@ let tests : (string * unit T.test_case list) list =
             T.match_raises "raises" Tcheck.missing_pred (fun () -> ignore (Config.E.require [] "X")));
         T.test_case "require_csv trims and drops empties" `Quick (fun () ->
             T.check (T.list T.string) "mismatch" [ "b"; "c" ] (Config.E.require_csv [ ("A", " b , , c ") ] "A"));
+      ] );
+    (
+      "min_similarity",
+      [
+        T.test_case "absent defaults to 0.0 (disabled)" `Quick (fun () ->
+            let p = write_env required_body in
+            T.check (T.float 0.001) "mismatch" 0.0 (Config.load ~env_file:p ()).Config.min_similarity;
+            Sys.remove p);
+        T.test_case "a valid floor is parsed" `Quick (fun () ->
+            T.check (T.float 0.001) "mismatch" 0.5 (min_similarity_of "0.5" ()));
+        T.test_case "boundaries 0.0 and 1.0 are accepted" `Quick (fun () ->
+            T.check (T.float 0.001) "mismatch" 0.0 (min_similarity_of "0.0" ());
+            T.check (T.float 0.001) "mismatch" 1.0 (min_similarity_of "1.0" ()));
+        T.test_case "NaN is rejected (float_of_string accepts it)" `Quick (fun () ->
+            T.match_raises "raises" Tcheck.failure_pred (fun () -> ignore (min_similarity_of "nan" ())));
+        T.test_case "infinity is rejected" `Quick (fun () ->
+            T.match_raises "raises" Tcheck.failure_pred (fun () -> ignore (min_similarity_of "inf" ())));
+        T.test_case "a negative value is rejected" `Quick (fun () ->
+            T.match_raises "raises" Tcheck.failure_pred (fun () -> ignore (min_similarity_of "-0.5" ())));
+        T.test_case "a value above 1 is rejected" `Quick (fun () ->
+            T.match_raises "raises" Tcheck.failure_pred (fun () -> ignore (min_similarity_of "1.5" ())));
+        T.test_case "a non-numeric value is rejected" `Quick (fun () ->
+            T.match_raises "raises" Tcheck.failure_pred (fun () -> ignore (min_similarity_of "abc" ())));
       ] );
     (
       "forms_allow",
