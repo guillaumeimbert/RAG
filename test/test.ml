@@ -16,4 +16,5 @@ let () =
     @ Test_xml.tests
     @ Test_ownership.tests
     @ Test_grounding.tests
-    @ Test_store.tests )
+    @ Test_store.tests
+    @ Test_migration.tests )

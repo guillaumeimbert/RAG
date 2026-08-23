@@ -48,6 +48,7 @@
   yojson
   zlib
   base
+  sha
   (alcotest
    :with-test))
  (tags

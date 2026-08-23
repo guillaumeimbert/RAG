@@ -18,6 +18,7 @@
   uri
   yojson
   re
-  zlib)
+  zlib
+  sha)
  (preprocess
   (pps lwt_ppx ppx_rapper)))

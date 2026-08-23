@@ -376,6 +376,100 @@ let () =
     let edgar_sock = ref None in
     let openai_sock = ref None in
     try
+      (* migration e2e: verify the migration tool applies an empty database to
+         the latest schema and upgrades an old snapshot. Uses a separate
+         database (the migration files use the production embedding dimension,
+         so this is not the 8-dim scratch DB used by the ingest/query tests). *)
+      let migrate_db = "raguesslighter_e2e_migrate" in
+      let migrate_cfg =
+        {
+          Config.database_url =
+            Printf.sprintf "postgresql://%s:%s@%s:%d/%s" pg_user pg_pass pg_host pg_port
+              migrate_db;
+          openai_base_url = "http://localhost:9/v1";
+          openai_api_key = "test";
+          openai_embed_base_url = "http://localhost:9/v1";
+          openai_embed_api_key = "test";
+          llm_model = "mock";
+          embedding_model = "mock";
+          Config.embedding_dim = embed_dim;
+          sec_user_agent = "test@example.com (e2e)";
+          sec_browse_edgar_base = "http://localhost:9";
+          sec_daily_index_base = "http://localhost:9";
+          sec_submissions_base = "http://localhost:9";
+          sec_fts_base = "http://localhost:9";
+          sec_archives_base = "http://localhost:9";
+          sec_company_tickers_url = "http://localhost:9";
+          forms = [ "10-K" ];
+          chunk_size = 900;
+          chunk_overlap = 120;
+          top_k = 8;
+          min_similarity = 0.0;
+        }
+      in
+      let migrate_tables (db : string) : string =
+        (match
+           pg_query db
+             "SELECT string_agg(tablename, ',' ORDER BY tablename) FROM pg_tables WHERE schemaname='public'"
+         with
+         | [ [ v ] ] -> v
+         | _ -> "")
+      in
+      (* (a) empty database -> latest schema *)
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      let up1 = Lwt_main.run (Migration.up migrate_cfg) in
+      (match up1 with
+      | Error e -> (check "migration up (empty): applied" false; Printf.eprintf "  up: %s\n%!" e; exit 1)
+      | Ok _ -> check "migration up (empty): applied" true);
+      let tables1 = migrate_tables migrate_db in
+      check "migration up (empty): schema_migrations + chunks + holdings + ownership_events"
+        (tables1 = "chunks,holdings,ownership_events,schema_migrations");
+      let mig_count =
+        (match
+           pg_query migrate_db "SELECT count(*)::int FROM schema_migrations"
+         with
+         | [ [ n ] ] -> int_of_string n
+         | _ -> -1)
+      in
+      check "migration up (empty): 6 migrations recorded" (mig_count = 6);
+      (* (b) idempotent: a second up is a no-op *)
+      let up2 = Lwt_main.run (Migration.up migrate_cfg) in
+      (match up2 with
+      | Error e -> (check "migration up (idempotent): no error" false; Printf.eprintf "  up: %s\n%!" e; exit 1)
+      | Ok _ -> check "migration up (idempotent): no error" true);
+      (* (c) old snapshot -> upgraded schema *)
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      let snap = Lwt_main.run (Migration.snapshot_up_to migrate_cfg 5) in
+      (match snap with
+      | Error e -> (check "migration snapshot (v<5): applied" false; Printf.eprintf "  snapshot: %s\n%!" e; exit 1)
+      | Ok _ -> check "migration snapshot (v<5): applied" true);
+      let snap_count =
+        (match
+           pg_query migrate_db "SELECT count(*)::int FROM schema_migrations"
+         with
+         | [ [ n ] ] -> int_of_string n
+         | _ -> -1)
+      in
+      check "migration snapshot (v<5): 4 migrations recorded" (snap_count = 4);
+      let up3 = Lwt_main.run (Migration.up migrate_cfg) in
+      (match up3 with
+      | Error e -> (check "migration up (upgrade): applied" false; Printf.eprintf "  up: %s\n%!" e; exit 1)
+      | Ok _ -> check "migration up (upgrade): applied" true);
+      let tables3 = migrate_tables migrate_db in
+      check "migration up (upgrade): full schema present"
+        (tables3 = "chunks,holdings,ownership_events,schema_migrations");
+      let mig_count3 =
+        (match
+           pg_query migrate_db "SELECT count(*)::int FROM schema_migrations"
+         with
+         | [ [ n ] ] -> int_of_string n
+         | _ -> -1)
+      in
+      check "migration up (upgrade): 6 migrations recorded" (mig_count3 = 6);
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+
       (* scratch database *)
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ scratch_db ^ ";");
       pg_exec pg_main_db ("CREATE DATABASE " ^ scratch_db ^ ";");

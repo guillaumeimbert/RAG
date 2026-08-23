@@ -120,6 +120,11 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   chunks the old check admitted — is upgraded by `0003_chunk_quality.sql`
   without failing: the migration removes the junk rows and installs the
   stronger regex `CHECK`; a fresh tab/newline-only insert is then rejected),
+- **migration tool** (`migrate.exe`): an empty database is brought to the
+  latest schema by `Migration.up` (all files applied, in order, and recorded
+  in `schema_migrations`); a second `up` is a no-op (idempotent); and an old
+  snapshot (a prefix of the files, via `Migration.snapshot_up_to`) is upgraded
+  to the latest schema by `Migration.up` (only the missing files applied),
 - **master-index discovery pre-filter** (`ingest day`): the day's master
   index is fetched once and the `FORMS` allow-list is applied to it before
   any per-filing fetch, so the index pages of allow-listed filings are
@@ -152,8 +157,11 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   (which tracks the candidate set) at 1000, so a larger `top_k` could not be
   served. The pure `version_at_least` comparator is unit-tested too.
 - The e2e test applies the schema files itself, in order (`0001` through
-  `0006_event_index.sql`). If you add `schema/0007_*.sql`, add it to
-  `test/e2e.ml`'s apply list too.
+  `0006_event_index.sql`), for the ingest/query flow; the migration-tool
+  tests use `Migration.up` / `Migration.snapshot_up_to` on a separate
+  database. If you add `schema/0007_*.sql`, the migration tests pick it up
+  automatically (they apply every file), and the ingest/query apply list in
+  `test/e2e.ml` must be extended too.
 - Fault injection makes 429/5xx retry loops finish instantly
   (`Net.set_backoff_scale 0.0` in the test), so a run that would
   otherwise retry for ~15 s per request completes in milliseconds.

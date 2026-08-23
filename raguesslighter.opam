@@ -37,6 +37,7 @@ depends: [
   "yojson"
   "zlib"
   "base"
+  "sha"
   "alcotest" {with-test}
   "odoc" {with-doc}
 ]

@@ -1,9 +1,10 @@
 # CLI reference
 
-Two executables, built by `dune build`:
+Three executables, built by `dune build`:
 
 - `dune exec bin/ingest.exe` — ingest SEC filings into the store.
 - `dune exec bin/query.exe` — search and query the store.
+- `dune exec bin/migrate.exe` — apply the schema migrations.
 
 Both accept `-e FILE, --env-file=FILE` (default `.env`) on every
 subcommand, and `--help[=FMT]` (`FMT` = `auto`, `pager`, `groff`,
@@ -112,3 +113,37 @@ Resolution failures print `could not resolve <subject> to a CIK`.
 
 Options: `-l N, --limit=N` (default `10`), `-s TICKER|CIK,
 --subject=TICKER|CIK` (required), `-e FILE`.
+
+## migrate.exe
+
+Apply the numbered `schema/*.sql` migrations. Migrations are a deployment
+step (they are not run automatically by `Store.create`). Every command takes
+`-e FILE, --env-file=FILE` (default `.env`) and `--help[=FMT]`.
+
+### `migrate up`
+
+Apply the missing migrations, in ascending file order. Each migration runs in
+its own transaction (its SQL statements and its `schema_migrations` record
+commit or roll back together), under a PostgreSQL advisory lock so concurrent
+`up` runs are serialized. Already-applied migrations are skipped. On an empty
+database this brings the schema up to date; on an existing database it applies
+only the new files.
+
+The applied migrations' checksums are verified against their files (an
+immutability guard): a recorded migration whose file has changed is an error.
+Never edit an applied migration — add a new `NNNN_*.sql` file instead.
+
+### `migrate status`
+
+Report the applied and pending migrations (no changes). The `schema_migrations`
+table is created (and the advisory lock is taken) so the command is safe on an
+empty database.
+
+### `migrate baseline`
+
+Record the current `schema/*.sql` files as applied **without re-running them**.
+This is the one-time transition for databases that were created before the
+tracker existed (e.g. by `compose.yaml`'s `docker-entrypoint-initdb.d`, which
+applies the schema files without leaving `schema_migrations` records). After
+`baseline`, `migrate up` applies only files added later. `baseline` refuses if
+a file's recorded checksum no longer matches.

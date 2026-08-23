@@ -33,62 +33,44 @@ SELECT form, count(*) FROM chunks GROUP BY form ORDER BY 2 DESC;
 SELECT max(created_at) FROM chunks;
 ```
 
-## Apply a new schema file to an existing database
+## Schema migrations
 
-`schema/*.sql` runs automatically **only on first initialization**
-(empty data volume). On a database that already has data, apply the
-files you have not yet run by hand, **in order** — they are written
-idempotent (`IF NOT EXISTS`), so re-running one is harmless:
+The schema is managed by numbered `schema/*.sql` migrations and the
+`migrate.exe` tool (see [the CLI reference](../reference/cli.md#migrateexe)).
+Migrations are a **deployment step** — they are *not* run automatically by
+`Store.create` or the ingest/query binaries. `Store.create` only verifies the
+pgvector extension version; the tables must already exist.
 
-```sh
-# e.g. after adding schema/0003_chunk_quality.sql to an existing store:
-podman compose exec -T db psql -U raguesslighter -d raguesslighter \
-  < schema/0003_chunk_quality.sql
-
-# verify the chunk-text constraint is now present:
-podman compose exec -T db psql -U raguesslighter -d raguesslighter \
-  -tAc "SELECT conname FROM pg_constraint WHERE conname = 'chunks_text_nonempty';"
-```
-
-(`0003_chunk_quality.sql` is also *corrective*: if an earlier space-only
-`btrim` version of the check is present it is replaced by the
-`[^[:space:]]` regex, so the command above converges on the right
-constraint either way.)
-
-`0004_halfvec_hnsw.sql` likewise converges: it converts the store to the
-halfvec HNSW expression index — dropping a pre-existing `embedding_hv`
-mirror column and any non-expression index, then (re)creating the index on the
-`embedding::halfvec(N)` cast — so an existing store gains the halfvec index
-without a re-ingest:
+**New database.** Bring the schema up to date with `migrate up` (it applies
+all the files, in order, each in its own transaction):
 
 ```sh
-podman compose exec -T db psql -U raguesslighter -d raguesslighter \
-  < schema/0004_halfvec_hnsw.sql
+dune exec bin/migrate.exe -- up
 ```
 
-`0005_position_index.sql` and `0006_event_index.sql` likewise converge on
-an existing store: they add the row-ordinal columns, back-fill a
-deterministic ordinal for pre-existing rows, and swap the holdings /
-ownership-events keys to the row-ordinal form (a no-op once applied):
+**Existing (compose-initialized) database.** A database created before the
+tracker existed (e.g. by `compose.yaml`'s `docker-entrypoint-initdb.d`, which
+applies the schema files without leaving `schema_migrations` records) needs a
+one-time `baseline` to record the current files as applied. After that, `migrate up`
+applies only files added later:
 
 ```sh
-podman compose exec -T db psql -U raguesslighter -d raguesslighter \
-  < schema/0005_position_index.sql
-podman compose exec -T db psql -U raguesslighter -d raguesslighter \
-  < schema/0006_event_index.sql
+dune exec bin/migrate.exe -- baseline   # one-time transition
+dune exec bin/migrate.exe -- status     # verify: all applied, none pending
 ```
 
-The back-fill writes a *synthetic* per-accession ordinal — enough to make
-the new key valid, but not the true XML row ordinal. If any holdings rows
-were previously collapsed by the old content-based key (the ingest
-previously de-duplicated duplicate `(accession, cusip, class, prnamt_type)`
-rows), the migration cannot recover the discarded rows; force-reingest the
-affected date to rewrite them with the true ordinals and the SEC
-`putCall` / `otherManager` fields:
+**Adding a migration.** Add a new `schema/NNNN_name.sql` file (the next
+number). Never edit an applied file — its checksum is recorded in
+`schema_migrations` and `migrate up` refuses to continue if a recorded file has
+changed (add a new file instead). Then run `migrate up` on each deployment:
 
 ```sh
-dune exec bin/ingest.exe -- day YYYY-MM-DD --force
+dune exec bin/migrate.exe -- up
 ```
+
+`migrate status` shows the applied and pending migrations at any time. The
+advisory lock serializes concurrent `up` runs, so it is safe to run from a
+`Makefile` target, a CI step, or a service entrypoint.
 
 When the index is (re)built on a large store, pgvector builds the HNSW graph
 in shared memory. Two separate settings govern this:
@@ -112,28 +94,27 @@ podman compose exec -T db psql -U raguesslighter -d raguesslighter \
 
 ## Reset the store
 
-Dropping the tables keeps the database; re-ingest to repopulate:
+Dropping the tables keeps the database; re-ingest to repopulate. The schema
+itself is managed by the migration tool (the `schema_migrations` records are
+untouched), so if you drop only the **data** (e.g. `TRUNCATE` or delete the
+rows) no schema step is needed. If you drop the **tables**, re-apply the
+schema by resetting the tracker and re-running `migrate up` (which re-applies
+every file, in order):
 
-```sql
-DROP TABLE IF EXISTS chunks CASCADE;
-DROP TABLE IF EXISTS ownership_events CASCADE;
-DROP TABLE IF EXISTS holdings CASCADE;
--- then re-run the schema files, in order:
-\i /docker-entrypoint-initdb.d/0001_init.sql
-\i /docker-entrypoint-initdb.d/0002_ownership.sql
-\i /docker-entrypoint-initdb.d/0003_chunk_quality.sql
-\i /docker-entrypoint-initdb.d/0004_halfvec_hnsw.sql
-\i /docker-entrypoint-initdb.d/0005_position_index.sql
-\i /docker-entrypoint-initdb.d/0006_event_index.sql
+```sh
+podman compose exec -T db psql -U raguesslighter -d raguesslighter \
+  -c "DROP TABLE IF EXISTS chunks CASCADE; DROP TABLE IF EXISTS ownership_events CASCADE; DROP TABLE IF EXISTS holdings CASCADE; DROP TABLE IF EXISTS schema_migrations CASCADE;"
+dune exec bin/migrate.exe -- up
 ```
 
 Or nuke everything including the volume (destructive):
 
 ```sh
-podman compose down -v && podman compose up -d
+podman compose down -v && podman compose up -d && dune exec bin/migrate.exe -- up
 ```
 
-The schema then re-runs on first init, and the store is empty.
+The compose initdb re-runs the schema files on first init (see below), then
+`migrate baseline` records them (or `migrate up` on a truly empty database).
 
 ## Change the embedding dimension
 

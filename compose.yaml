@@ -5,8 +5,13 @@
 #   podman compose down -v      # stop AND destroy data
 #
 # NOTE: schema/*.sql runs automatically ONLY on first initialization
-# (empty data volume). After that, apply changes with psql or a migration
-# tool:  podman compose exec db psql -U raguesslighter -d raguesslighter
+# (empty data volume, via the /docker-entrypoint-initdb.d mount below). That
+# first-init path leaves no schema_migrations records, so run
+#   dune exec bin/migrate.exe -- baseline
+# once after the first init to adopt the migration tracker. On a truly empty
+# database, `dune exec bin/migrate.exe -- up` is the canonical path (it applies
+# the files AND records them). After adoption, apply new migrations with
+# `migrate up` (see docs/how-to/database.md).
 
 services:
   db:
