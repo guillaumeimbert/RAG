@@ -14,4 +14,5 @@ let () =
     @ Test_html_text.tests
     @ Test_net.tests
     @ Test_xml.tests
-    @ Test_ownership.tests )
+    @ Test_ownership.tests
+    @ Test_grounding.tests )

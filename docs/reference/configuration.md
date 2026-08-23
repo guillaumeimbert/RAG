@@ -43,6 +43,7 @@ different file on a per-invocation basis.
 | `CHUNK_SIZE` | `1200` | Target chunk length in characters. |
 | `CHUNK_OVERLAP` | `200` | Overlap between consecutive chunks, in characters. |
 | `TOP_K` | `8` | Default number of hits for `query search` / `ask` (overridden by `-k`). |
+| `MIN_SIMILARITY` | `0.0` | Cosine-similarity floor for vector search. Hits below it are dropped, so an unrelated query can return **no** results instead of the nearest `TOP_K` (which `ask` would otherwise feed to the LLM as evidence). `0.0` disables the filter. Tune against your embedding model's score distribution. |
 
 ## Constraints and interactions
 

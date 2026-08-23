@@ -114,6 +114,10 @@ type t = {
   chunk_size : int;
   chunk_overlap : int;
   top_k : int;
+  (** Minimum cosine similarity (0..1) for a hit to be returned. A query whose
+      nearest chunks score below this returns nothing ("no results") instead
+      of feeding the LLM irrelevant material. 0.0 disables the filter. *)
+  min_similarity : float;
 }
 
 let load ?(env_file = ".env") () : t =
@@ -149,6 +153,12 @@ let load ?(env_file = ".env") () : t =
     chunk_size = E.require_int e "CHUNK_SIZE";
     chunk_overlap = E.require_int e "CHUNK_OVERLAP";
     top_k = E.require_int e "TOP_K";
+    min_similarity =
+      (match E.get e "MIN_SIMILARITY" with
+       | Some v ->
+         (try float_of_string v
+          with Failure _ -> failwith ("MIN_SIMILARITY must be a float, got '" ^ v ^ "'"))
+       | None -> 0.0);
   }
 
 (** True when [form] should be ingested: when its normalised code is in

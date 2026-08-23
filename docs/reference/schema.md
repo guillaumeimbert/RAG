@@ -26,7 +26,10 @@ One row per text chunk of one filing. Written by the ingest pipeline
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |
 
 Constraints/indexes: `UNIQUE (doc_id, chunk_index)` (ingest
-idempotency); `chunks_embedding_hnsw` on `embedding`
+idempotency); `CHECK (btrim(text) <> '')` (a chunk must carry
+non-whitespace text, added by `0003_chunk_quality.sql` — the database
+itself rejects an empty or whitespace-only chunk, not just the chunker);
+`chunks_embedding_hnsw` on `embedding`
 (`vector_cosine_ops`) — created only when `N ≤ 2000` (pgvector
 HNSW limit), otherwise retrieval falls back to sequential scan;
 B-tree indexes on `doc_id`, `(company, form)`, `(cik, filed_at DESC)`

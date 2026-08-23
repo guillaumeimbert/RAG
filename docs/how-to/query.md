@@ -30,6 +30,17 @@ query.exe search "dividends" --form 8-K
 Filters combine with `AND`. If nothing matches, drop the most
 restrictive filter first.
 
+### Reject low-quality matches
+
+By default `search` always returns the nearest `TOP_K` hits, however
+poor. Set `MIN_SIMILARITY` in `.env` (e.g. `0.5`) to drop hits whose
+cosine similarity is below the floor — an unrelated query then prints
+`no results` instead of the nearest, least-relevant passages. `ask`
+uses the same floor, so it will say there is no supporting material
+rather than ground an answer in off-topic passages. Tune the value
+against your embedding model's score distribution (see
+[configuration](../reference/configuration.md)).
+
 ## Ask a question
 
 ```sh

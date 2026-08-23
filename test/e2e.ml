@@ -248,8 +248,10 @@ let () =
         |> rewrite_dim embed_dim
       in
       let schema2 = Test_fixtures.read_text (Test_fixtures.schema_file "0002_ownership.sql") in
+      let schema3 = Test_fixtures.read_text (Test_fixtures.schema_file "0003_chunk_quality.sql") in
       pg_exec scratch_db schema;
       pg_exec scratch_db schema2;
+      pg_exec scratch_db schema3;
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;
 
       (* Make 429/5xx retry loops (fault injection) finish instantly. *)
@@ -284,6 +286,7 @@ let () =
           chunk_size = 900;
           chunk_overlap = 120;
           top_k = 8;
+          min_similarity = 0.0;
         }
       in
       let store = Lwt_main.run (Store.create cfg) in
@@ -403,6 +406,119 @@ let () =
         ( List.length pos = 1
         && (match List.hd pos with
              | p -> p.Store.filer_cik = "0001045810" && p.Store.issuer_name = "NEBIUS GROUP N.V.") );
+
+      (* 4c. semantic retrieval relevance: the store must rank by ACTUAL
+         cosine similarity, not merely return rows. Insert three chunks with
+         hand-crafted ORTHOGONAL unit vectors (bypassing the hash-based mock
+         embedding) and assert the exact ranking for each query. Restricted to
+         cik "999" so the hash-vector NVDA chunks cannot interfere. *)
+      let unit_vec i = List.init embed_dim (fun j -> if j = i then 1.0 else 0.0) in
+      let sem_chunk doc text v =
+        { Store.doc_id = doc
+        ; company = "SEM"
+        ; cik = "999"
+        ; ticker = ""
+        ; form = "10-K"
+        ; filed_at = "2026-01-01"
+        ; section = "s"
+        ; chunk_index = 0
+        ; text
+        ; embedding = Store.vector_to_string v }
+      in
+      let () =
+        Lwt_main.run
+          (Lwt.bind
+             (Store.upsert_chunks store "sem-revenue"
+                [ sem_chunk "sem-revenue" "Revenue grew 40 percent year over year." (unit_vec 0) ])
+             (fun () ->
+               Lwt.bind
+                 (Store.upsert_chunks store "sem-risk"
+                    [ sem_chunk "sem-risk" "Principal risk: supply chain concentration in one region." (unit_vec 1) ])
+                 (fun () ->
+                   Store.upsert_chunks store "sem-lease"
+                     [ sem_chunk "sem-lease" "The operating lease for office 12 was renewed." (unit_vec 2) ])))
+      in
+      let rev_hits =
+        Lwt_main.run (Store.search store ~query:(Store.vector_to_string (unit_vec 0)) ~top_k:3 ~cik:(Some "999") ())
+      in
+      check "semantic: a revenue query ranks the revenue chunk first"
+        (match rev_hits with
+         | h :: _ -> h.Store.doc_id = "sem-revenue" && h.Store.similarity > 0.99
+         | [] -> false);
+      let risk_hits =
+        Lwt_main.run (Store.search store ~query:(Store.vector_to_string (unit_vec 1)) ~top_k:3 ~cik:(Some "999") ())
+      in
+      check "semantic: a risk query ranks the risk chunk first"
+        (match risk_hits with
+         | h :: _ -> h.Store.doc_id = "sem-risk" && h.Store.similarity > 0.99
+         | [] -> false);
+
+      (* 4d. similarity threshold: a query orthogonal to every stored vector
+         has ~0 similarity to everything. With the default threshold it still
+         returns the nearest rows; with a minimum-similarity threshold it
+         returns NOTHING - the no-results path, so ask does not feed the LLM
+         irrelevant material. A genuinely relevant query still passes. *)
+      let unrel_q = Store.vector_to_string (unit_vec 3) in
+      let unrel_hits =
+        Lwt_main.run (Store.search store ~query:unrel_q ~top_k:3 ~cik:(Some "999") ())
+      in
+      check "semantic: an unrelated query is dissimilar to everything"
+        (List.length unrel_hits = 3 && List.for_all (fun h -> h.Store.similarity < 0.01) unrel_hits);
+      let none_hits =
+        Lwt_main.run
+          (Store.search store ~query:unrel_q ~top_k:3 ~cik:(Some "999") ~min_similarity:0.5 ())
+      in
+      check "threshold: an unrelated query above the threshold returns no results" (none_hits = []);
+      let rev_thr =
+        Lwt_main.run
+          (Store.search store ~query:(Store.vector_to_string (unit_vec 0)) ~top_k:3 ~cik:(Some "999")
+             ~min_similarity:0.5 ())
+      in
+      check "threshold: a relevant query still passes the threshold"
+        (match rev_thr with | h :: _ -> h.Store.doc_id = "sem-revenue" | [] -> false);
+
+      (* 4e. structured retrieval: latest-event-per-filer selection, previous
+         event deltas, multiple filers, and amendment handling. Insert a known
+         set of 13G events directly and assert the SQL aggregation. *)
+      let ev accession filer date pct sh amend =
+        { Store.accession = accession
+        ; form = "13G"
+        ; event_date = date
+        ; filed_at = date
+        ; filer_cik = filer
+        ; filer_name = "FILER " ^ filer
+        ; subject_cik = "0000000001"
+        ; subject_name = "TESTCO"
+        ; subject_cusip = ""
+        ; class_name = "Class A"
+        ; shares = Some sh
+        ; percent = Some pct
+        ; passive = true
+        ; is_amendment = amend
+        ; index_url = "" }
+      in
+      let () =
+        Lwt_main.run
+          (Store.upsert_own_events store
+             [ ev "test-ev-a1" "0000000002" "2026-01-01" 5.0 1000000 false
+             ; ev "test-ev-a2" "0000000002" "2026-06-01" 7.0 1500000 false
+             ; ev "test-ev-b1" "0000000003" "2026-03-01" 2.0 300000 true ])
+      in
+      let tco = Lwt_main.run (Store.holders_of store ~subject_cik:"0000000001" ~limit:10) in
+      check "structured: two filers returned, ordered by latest stake size" (List.length tco = 2);
+      check "structured: latest event per filer wins + previous-event delta"
+        (match tco with
+         | a :: b :: _ ->
+           a.Store.filer_cik = "0000000002"
+           && a.Store.percent = 7.0
+           && a.Store.shares = 1500000.0
+           && a.Store.prev_percent = 5.0
+           && a.Store.prev_shares = 1000000.0
+           && b.Store.filer_cik = "0000000003"
+           && b.Store.percent = 2.0
+           && b.Store.prev_percent < 0.
+           && b.Store.is_amendment
+         | _ -> false);
 
       (* 5. ticker resolution *)
       let nvda = Lwt_main.run (Edgar.cik_of_ticker cfg "NVDA") in
@@ -694,6 +810,51 @@ let () =
       check "force 13gd: zero-row re-ingest clears events and chunks"
         (count_where "ownership_events" gdoc = 0 && count_where "chunks" gdoc = 0);
 
+      (* 8. chunk quality / data integrity: every stored chunk is nonempty,
+         within the chunker's size limit, and free of internal section markers
+         and leaked HTML markup; the database itself rejects empty/whitespace
+         chunk text. Runs after all probe inserts so the whole chunks table
+         (real-fixture, semantic and probe chunks) is covered. *)
+      let all_chunks =
+        (match pg_query scratch_db "SELECT text FROM chunks" with
+         | rows -> List.map (fun r -> List.hd r) rows
+         | exception Failure _ -> [])
+      in
+      let max_size = cfg.Config.chunk_size in
+      let tag_like = Re.compile (Re.Pcre.re "</?[A-Za-z][^>]*>") in
+      let clean t =
+        String.trim t <> ""
+        && String.length t <= max_size
+        && not (String.contains t (Char.chr 31))  (* \x1f section marker *)
+        && not (String.contains t (Char.chr 30))  (* \x1e section marker *)
+        && Re.all tag_like t = []                 (* no leaked HTML tag *)
+      in
+      check "chunk quality: every stored chunk is nonempty, size-limited, marker-free, tag-free"
+        (List.length all_chunks > 0 && List.for_all clean all_chunks);
+
+      (* the database enforces the nonempty invariant too: a whitespace-only
+         chunk is rejected by the CHECK constraint and never stored. *)
+      let ws_chunk =
+        { Store.doc_id = "sem-ws"; company = "SEM"; cik = "999"; ticker = ""; form = "10-K"
+        ; filed_at = "2026-01-01"; section = "s"; chunk_index = 0
+        ; text = "   "; embedding = Store.vector_to_string (unit_vec 0) }
+      in
+      let ws_rejected = ref false in
+      let () =
+        Lwt_main.run
+          (Lwt.catch
+             (fun () -> Store.upsert_chunks store "sem-ws" [ ws_chunk ])
+             (function
+               | Store.Db _ -> (ws_rejected := true; Lwt.return_unit)
+               | e -> Lwt.fail e))
+      in
+      check "db: a whitespace-only chunk is rejected (CHECK constraint)" !ws_rejected;
+      let ws_stored =
+        (match pg_query scratch_db "SELECT count(*)::int FROM chunks WHERE doc_id = 'sem-ws'" with
+         | [ [ n ] ] -> int_of_string n | _ -> -1)
+      in
+      check "db: the rejected chunk was not stored" (ws_stored = 0);
+
       (* 7j. CLI exit codes (the real ingest binary, as a subprocess): a run
          with failed filings exits non-zero; a clean run and a bad date
          behave correctly. Requires RAG_E2E_INGEST_BIN (CI sets it). *)
@@ -708,8 +869,10 @@ let () =
             |> rewrite_dim embed_dim
           in
           let schema2 = Test_fixtures.read_text (Test_fixtures.schema_file "0002_ownership.sql") in
+          let schema3 = Test_fixtures.read_text (Test_fixtures.schema_file "0003_chunk_quality.sql") in
           pg_exec cli_db schema;
-          pg_exec cli_db schema2
+          pg_exec cli_db schema2;
+          pg_exec cli_db schema3
         in
         let env_file = Filename.temp_file "rag_e2e_env" ".env" in
         let () =

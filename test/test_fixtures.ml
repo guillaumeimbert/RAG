@@ -59,4 +59,5 @@ let cfg_for (base : string) (over : Config.t -> Config.t) : Config.t =
       chunk_size = 900;
       chunk_overlap = 120;
       top_k = 8;
+      min_similarity = 0.0;
     }

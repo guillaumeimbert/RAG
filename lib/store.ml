@@ -103,6 +103,11 @@ type hit = {
   similarity : float;
 }
 
+(** Vector search. The inner query does the index-friendly nearest-neighbour
+    work (ORDER BY distance LIMIT top_k); the outer query then drops any hit
+    whose cosine similarity falls below [min_similarity], so a nonsense or
+    unrelated query returns NOTHING rather than the nearest top_k however bad
+    they are. [min_similarity] = 0.0 disables the filter (default behaviour). *)
 let search_q =
   [%rapper
     get_many
@@ -112,18 +117,33 @@ let search_q =
         doc_id AS @string{doc_id},
         company AS @string{company},
         cik AS @string{cik},
-        COALESCE(ticker, '') AS @string{ticker},
+        ticker AS @string{ticker},
         form AS @string{form},
-        filed_at::text AS @string{filed_at},
-        COALESCE(section, '') AS @string{section},
+        filed_at AS @string{filed_at},
+        section AS @string{section},
         text AS @string{text},
-        1 - (embedding <=> %string{q}::vector) AS @float{similarity}
-      FROM chunks
-      WHERE ('' = %string{cik} OR cik = %string{cik})
-        AND ('' = %string{form} OR form = %string{form})
-        AND ('' = %string{ticker} OR ticker = %string{ticker})
-      ORDER BY embedding <=> %string{q}::vector
-      LIMIT %int{top_k}
+        similarity AS @float{similarity}
+      FROM (
+        SELECT
+          id,
+          doc_id,
+          company,
+          cik,
+          COALESCE(ticker, '') AS ticker,
+          form,
+          filed_at::text AS filed_at,
+          COALESCE(section, '') AS section,
+          text,
+          1 - (embedding <=> %string{q}::vector) AS similarity
+        FROM chunks
+        WHERE ('' = %string{cik} OR cik = %string{cik})
+          AND ('' = %string{form} OR form = %string{form})
+          AND ('' = %string{ticker} OR ticker = %string{ticker})
+        ORDER BY embedding <=> %string{q}::vector
+        LIMIT %int{top_k}
+      ) ranked
+      WHERE ranked.similarity >= %float{min_similarity}
+      ORDER BY ranked.similarity DESC
     |sql}
     record_out syntax_off]
 
@@ -589,7 +609,7 @@ let upsert_chunks ?(force = false) t (doc_id : string) (rows : chunk_row list) :
     else upsert_chunks_on conn rows)
 
 (** Vector search with optional metadata filters (empty/None = no filter). *)
-let search t ~query ~top_k ?(cik : string option = None) ?(form : string option = None) ?(ticker : string option = None) () :
+let search t ~query ~top_k ?(cik : string option = None) ?(form : string option = None) ?(ticker : string option = None) ?(min_similarity : float = 0.0) () :
     hit list Lwt.t =
   Lwt.bind
     ( Caqti_lwt_unix.Pool.use
@@ -599,6 +619,7 @@ let search t ~query ~top_k ?(cik : string option = None) ?(form : string option 
             ~cik:(Option.value ~default:"" cik)
             ~form:(Option.value ~default:"" form)
             ~ticker:(Option.value ~default:"" ticker)
+            ~min_similarity
             ~top_k
             conn)
         t.pool )

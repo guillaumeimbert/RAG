@@ -52,21 +52,6 @@ let embed_query (cfg : Config.t) (text : string) : string Lwt.t =
     | [ v ] -> Lwt.return (Store.vector_to_string v)
     | _ -> Lwt.fail (Openai.Api_error "unexpected number of embeddings"))
 
-let meta (h : Store.hit) : string =
-  let ticker = if h.ticker = "" then "" else " (" ^ h.ticker ^ ")" in
-  let section = if h.section = "" then "" else ", \"" ^ h.section ^ "\"" in
-  h.company ^ ticker ^ " — " ^ h.form ^ ", filed " ^ h.filed_at ^ section
-
-(** [truncate s n] = [s] cut to at most [n] bytes (≈ characters for ASCII
-    text), suffixed with an ellipsis when shortened. The cut is backed off
-    to a UTF-8 character boundary so a multi-byte character is never split
-    (a dangling lead byte would make the LLM request body invalid UTF-8
-    and the server reject it). *)
-let truncate s n =
-  if String.length s <= n
-  then s
-  else String.sub s 0 (Stringx.utf8_boundary_before s n) ^ " […]"
-
 (* ------------------------------------------------------------------ *)
 (* Structured ownership (SQL, not vectors)                            *)
 (* ------------------------------------------------------------------ *)
@@ -229,14 +214,14 @@ let search_cmd =
     in
     run_query ~env_file:e (fun cfg store ->
         Lwt.bind (embed_query cfg text) (fun q ->
-          Lwt.bind (Store.search store ~query:q ~top_k:(Option.value ~default:cfg.Config.top_k k) ~cik:cik ~form:form ~ticker:ticker ()) (fun hits ->
+          Lwt.bind (Store.search store ~query:q ~top_k:(Option.value ~default:cfg.Config.top_k k) ~cik:cik ~form:form ~ticker:ticker ~min_similarity:cfg.Config.min_similarity ()) (fun hits ->
             if hits = []
             then Printf.printf "no results\n"
             else
               List.iteri
                 (fun i (h : Store.hit) ->
-                  Printf.printf "[%d] %.3f  %s\n     %s\n" (i + 1) h.similarity (meta h)
-                    (truncate (Stringx.replace h.text ~sub:"\n" ~by:" ") 240);
+                  Printf.printf "[%d] %.3f  %s\n     %s\n" (i + 1) h.similarity (Grounding.meta h)
+                    (Grounding.truncate (Stringx.replace h.text ~sub:"\n" ~by:" ") 240);
                   ())
                 hits;
             Lwt.return_unit)))
@@ -275,25 +260,18 @@ let ask_cmd =
     in
     run_query ~env_file:e (fun cfg store ->
         Lwt.bind (embed_query cfg text) (fun q ->
-          Lwt.bind (Store.search store ~query:q ~top_k:(Option.value ~default:cfg.Config.top_k k) ~cik:cik ~form:form ~ticker:ticker ()) (fun hits ->
+          Lwt.bind (Store.search store ~query:q ~top_k:(Option.value ~default:cfg.Config.top_k k) ~cik:cik ~form:form ~ticker:ticker ~min_similarity:cfg.Config.min_similarity ()) (fun hits ->
             Lwt.bind (ownership_evidence cfg store text) (fun evidence ->
               if hits = [] && evidence = ""
               then (
                 Printf.printf "no results\n";
                 Lwt.return_unit)
               else
-                let excerpts =
-                  List.mapi
-                    (fun i h ->
-                      Format.sprintf "[%d] %s\n%s" (i + 1) (meta h)
-                        (truncate h.text 900))
-                    hits
-                  in
                 let evidence_block =
                   if evidence = "" then "" else "\n\nStructured ownership data (exact figures from SQL):\n" ^ evidence
                 in
                 let excerpts_block =
-                  if hits = [] then "" else "\n\nExcerpts from SEC filings:\n\n" ^ String.concat "\n\n" excerpts
+                  if hits = [] then "" else "\n\nExcerpts from SEC filings:\n\n" ^ Grounding.excerpts hits
                 in
                 let user = "Question: " ^ text ^ evidence_block ^ excerpts_block in
                 Lwt.bind
@@ -301,9 +279,7 @@ let ask_cmd =
                      [ { Openai.role = `User; content = user } ])
                   (fun answer ->
                     Printf.printf "%s\n\nSources:\n" answer;
-                    List.iteri
-                      (fun i h -> Printf.printf "  [%d] %s\n" (i + 1) (meta h))
-                      hits;
+                    Printf.printf "%s" (Grounding.sources hits);
                     (if evidence = "" then ()
                      else Printf.printf "  [SQL] structured ownership data (13F/13G/13D, exact figures)\n");
                     Lwt.return_unit)))))

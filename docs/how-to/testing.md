@@ -75,13 +75,31 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   chunks),
 - **forced re-ingest** (`--force` replaces stored rows without
   duplicating them),
+- **retrieval relevance** (hand-crafted orthogonal unit vectors, so the
+  test checks the store ranks by *actual* cosine similarity — a revenue
+  query ranks the revenue chunk first, an unrelated query is dissimilar
+  to everything),
+- **similarity threshold** (`MIN_SIMILARITY`): an unrelated query above
+  the floor returns **no** results (the path `ask` takes to avoid feeding
+  the LLM irrelevant material), while a relevant query still passes,
+- **structured retrieval** (latest-event-per-filer selection,
+  previous-event deltas, multiple filers, amendment flag),
+- **chunk quality / data integrity** (every stored chunk is nonempty,
+  within `CHUNK_SIZE`, and free of section markers and leaked HTML tags;
+  the database itself rejects a whitespace-only chunk via its `CHECK`
+  constraint and never stores it),
 - **CLI exit codes** (via the built binary, when `RAG_E2E_INGEST_BIN`
   is set).
 
 ## Notes
 
-- The e2e test applies the schema files itself, in order — if you add
-  `schema/0003_*.sql`, add it to `test/e2e.ml`'s apply list too.
+- The unit tests also cover the **ask citation mapping** (`Grounding`):
+  the *i*-th hit must carry citation `[i+1]` in both the excerpts block
+  given to the LLM and the Sources block printed after its answer, so the
+  model's `[n]` markers resolve to the right filing.
+- The e2e test applies the schema files itself, in order (`0001`, `0002`,
+  and `0003_chunk_quality.sql`). If you add `schema/0004_*.sql`, add it to
+  `test/e2e.ml`'s apply list too.
 - Fault injection makes 429/5xx retry loops finish instantly
   (`Net.set_backoff_scale 0.0` in the test), so a run that would
   otherwise retry for ~15 s per request completes in milliseconds.
