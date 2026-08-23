@@ -5,58 +5,48 @@ module F = Test_fixtures
 let tests : (string * unit T.test_case list) list =
   [
     (
-      "parse_sitemap",
+      "parse_master",
       [
-        T.test_case "real capture pins the live format" `Quick (fun () ->
-            (* Real capture of the first 12 entries of
-               /Archives/edgar/daily-index/2026/QTR3/sitemap.20260821.xml
-               (verified live 2026-08-22). Short-form <loc> URLs (dashed
-               accession directly under the unpadded CIK directory),
-               http:// (upgraded to https). The endpoint serves identity by
-               default and gzip when requested (Accept-Encoding: gzip); the
-               .gz fixture is the same capture gzipped, so both encodings
-               are pinned. *)
-            let fs = F.read_text (F.fix "sitemap.xml") |> Edgar.parse_sitemap in
-            T.check T.int "mismatch" 12 (List.length fs);
-            T.check (T.list (T.pair T.string T.string)) "mismatch" [
-                ("0000000000-24-008189", "2019042");
-                ("0000000000-24-013440", "2019042");
-                ("0000000000-25-000133", "2019042");
-                ("0000000000-25-002933", "2019042");
-                ("0000000000-25-003640", "2019042");
-                ("0000000000-25-004448", "1083743");
-                ("0000000000-25-005511", "2054947");
-                ("0000000000-25-005601", "2065601");
-                ("0000000000-25-006098", "2044725");
-                ("0000000000-25-006155", "2067767");
-                ("0000000000-25-006220", "2054947");
-                ("0000000000-25-006459", "2063022");
-              ] (List.map (fun (f : Edgar.filing) -> (f.accession, f.cik)) fs);
-            (* http:// entries were upgraded to https:// *)
-            T.check T.bool "https urls" true (List.for_all (fun u -> String.starts_with u ~prefix:"https://")
-                       (List.map (fun (f : Edgar.filing) -> f.index_url) fs));
-            T.check T.string "short-form index url"
-              "https://www.sec.gov/Archives/edgar/data/2019042/0000000000-24-008189-index.htm"
-              (List.hd (List.map (fun (f : Edgar.filing) -> f.index_url) fs)));
-        T.test_case "gzip-encoded capture parses identically" `Quick (fun () ->
-            let fs = Gz.gunzip (F.read_bin (F.fix "sitemap.xml.gz")) |> Edgar.parse_sitemap in
-            T.check T.int "mismatch" 12 (List.length fs);
-            T.check T.string "mismatch" "0000000000-24-008189"
-              (List.hd (List.map (fun (f : Edgar.filing) -> f.accession) fs)));
-        T.test_case "duplicates and non-index entries are skipped" `Quick (fun () ->
-            let xml =
-              "<urlset>"
-              ^ "<url><loc>https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000021-index.htm</loc></url>"
-              ^ "<url><loc>https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000021-index.htm</loc></url>"
-              ^ "<url><loc>https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm</loc></url>"
-              ^ "</urlset>" in
-            let fs = Edgar.parse_sitemap xml in
-            T.check (T.list T.string) "mismatch" ["0001045810-26-000021"]
-              (List.map (fun (f : Edgar.filing) -> f.accession) fs));
+        T.test_case "fixture pins the live format" `Quick (fun () ->
+            (* Real capture of the daily master index format (verified live
+               2026-08-22 against master.20260820.idx): five header lines, a
+               CIK|Company Name|Form Type|Date Filed|File Name column line, an
+               80-dash separator, then pipe-delimited rows whose File Name is
+               the canonical archive path {cik}/{accession}.txt. The same
+               accession is listed once per related CIK (the last row repeats
+               the first). *)
+            let rows = F.read_text (F.fix "master.idx") |> Edgar.parse_master in
+            T.check T.int "12 rows" 12 (List.length rows);
+            let first = List.hd rows in
+            T.check T.string "cik" "1045810" first.Edgar.cik;
+            T.check T.string "company" "NVIDIA CORP" first.Edgar.company;
+            T.check T.string "form_type" "10-K" first.Edgar.form_type;
+            T.check T.string "date" "20260820" first.Edgar.date;
+            T.check T.string "accession" "0001045810-26-000021" first.Edgar.accession;
+            (* the Form Type column is preserved verbatim (normalisation is
+               master_filings' job, not the parser's) *)
+            let by_acc a = List.find (fun (r : Edgar.master_row) -> r.Edgar.accession = a) rows in
+            T.check T.string "SCHEDULE prefix kept" "SCHEDULE 13G" (by_acc "0001045810-26-000062").Edgar.form_type;
+            T.check T.string "SC prefix kept" "SC 13D" (by_acc "0000320193-26-000050").Edgar.form_type);
+        T.test_case "header, separator and blank lines are skipped" `Quick (fun () ->
+            let body =
+              "Description:           Daily Index of EDGAR Dissemination Feed\n"
+              ^ " \n"
+              ^ "CIK|Company Name|Form Type|Date Filed|File Name\n"
+              ^ "--------------------------------------------------------------------------------\n"
+              ^ "1045810|NVIDIA CORP|10-K|20260820|edgar/data/1045810/0001045810-26-000021.txt" in
+            let rows = Edgar.parse_master body in
+            T.check T.int "one row" 1 (List.length rows);
+            T.check T.string "accession" "0001045810-26-000021" (List.hd rows).Edgar.accession);
         T.test_case "empty document" `Quick (fun () ->
-            T.check (T.list T.string) "mismatch" [] (Edgar.parse_sitemap "" |> List.map (fun (f : Edgar.filing) -> f.accession)) );
-        T.test_case "no matching entries" `Quick (fun () ->
-            T.check (T.list T.string) "mismatch" [] (Edgar.parse_sitemap "<urlset></urlset>" |> List.map (fun (f : Edgar.filing) -> f.accession)) );
+            T.check (T.list T.string) "mismatch" [] (Edgar.parse_master "" |> List.map (fun (r : Edgar.master_row) -> r.Edgar.accession)));
+        T.test_case "malformed rows are ignored" `Quick (fun () ->
+            let body =
+              "not a row\n"
+              ^ "1|2\n"
+              ^ "12345|CO|10-K|2026|edgar/data/12345/x.txt\n"
+              ^ "12345|CO|10-K|20260820|no-slash.txt" in
+            T.check (T.list T.string) "mismatch" [] (Edgar.parse_master body |> List.map (fun (r : Edgar.master_row) -> r.Edgar.accession)));
       ] );
     (
       "find_cik",
@@ -128,8 +118,10 @@ let tests : (string * unit T.test_case list) list =
         T.test_case "letter/anonymous filing (no form metadata) -> None" `Quick (fun () ->
             (* real capture of a CIK-0 letter filing: same index-page template
                but no form section, no filing date, no HTML documents. A whole
-               day of sitemaps contains several of these; they must be skipped,
-               not fail the run. *)
+               day's master index contains several of these; they must be
+               skipped, not fail the run. (With master-index pre-filtering most
+               are dropped before the index page is fetched; this path is the
+               safety net for the rest. *)
             let filing =
               { Edgar.accession = "0000000000-24-008189"; cik = "2019042"; index_url = "http://x" } in
             T.check (T.option T.string) "mismatch" None (Edgar.parse_index filing (F.read_text (F.fix "letter_filing_index.html")) |> Option.map (fun fi -> fi.Edgar.form)) );
@@ -155,15 +147,35 @@ let tests : (string * unit T.test_case list) list =
             T.check T.string "mismatch" "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm" (Edgar.primary_url fi));
       ] );
     (
-      "listing_url",
+      "master_url",
       [
         T.test_case "QTR3 in August" `Quick (fun () ->
             let cfg = F.cfg_for "http://sec" (fun c -> c) in
-            (* verified live 2026-08-22: /daily-index/{YYYY}/QTR{q}/sitemap.{YYYYMMDD}.xml
-               (the date-first form returns 403) *)
-            T.check T.string "mismatch" "http://sec/2025/QTR3/sitemap.20250818.xml" (Edgar.listing_url cfg (Date.of_string "2025-08-18")));
+            (* verified live 2026-08-22: /daily-index/{YYYY}/QTR{q}/master.{YYYYMMDD}.idx *)
+            T.check T.string "mismatch" "http://sec/2025/QTR3/master.20250818.idx" (Edgar.master_url cfg (Date.of_string "2025-08-18")));
         T.test_case "QTR1 in February" `Quick (fun () ->
             let cfg = F.cfg_for "http://sec" (fun c -> c) in
-            T.check T.string "mismatch" "http://sec/2025/QTR1/sitemap.20250210.xml" (Edgar.listing_url cfg (Date.of_string "2025-02-10")));
+            T.check T.string "mismatch" "http://sec/2025/QTR1/master.20250210.idx" (Edgar.master_url cfg (Date.of_string "2025-02-10")));
+      ] );
+    (
+      "master_filings",
+      [
+        T.test_case "filters by cfg forms and dedupes by accession" `Quick (fun () ->
+            let cfg = F.cfg_for "http://sec" (fun c -> { c with Config.forms = ["10-K"; "10-K/A"; "8-K"; "13G"] }) in
+            let rows = F.read_text (F.fix "master.idx") |> Edgar.parse_master in
+            let fs = Edgar.master_filings cfg rows in
+            T.check (T.list T.string) "accessions (first-occurrence order, deduped)"
+              ["0001045810-26-000021"; "0000320193-25-000079"; "0001045810-26-000100"; "0001045810-26-000062"]
+              (List.map (fun (f : Edgar.filing) -> f.Edgar.accession) fs);
+            T.check T.string "index url" "http://sec/Archives/edgar/data/1045810/0001045810-26-000021-index.htm"
+              (List.hd (List.map (fun (f : Edgar.filing) -> f.Edgar.index_url) fs)));
+        T.test_case "ALL keeps every unique accession" `Quick (fun () ->
+            let cfg = F.cfg_for "http://sec" (fun c -> { c with Config.forms = ["ALL"] }) in
+            let rows = F.read_text (F.fix "master.idx") |> Edgar.parse_master in
+            T.check T.int "11 unique accessions (12 rows minus 1 duplicate)" 11 (List.length (Edgar.master_filings cfg rows)));
+        T.test_case "no matching form -> empty" `Quick (fun () ->
+            let cfg = F.cfg_for "http://sec" (fun c -> { c with Config.forms = ["20-F"] }) in
+            let rows = F.read_text (F.fix "master.idx") |> Edgar.parse_master in
+            T.check T.int "none" 0 (List.length (Edgar.master_filings cfg rows)));
       ] );
   ]

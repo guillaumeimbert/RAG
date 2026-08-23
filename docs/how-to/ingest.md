@@ -60,9 +60,15 @@ use it to fix a specific scope (`--limit`, a single `day`, one
 ingest.exe day 2026-08-20
 ```
 
-This fetches the **complete** filing set for that date (roughly 5,000
-accessions) and ingests the ones matching `FORMS`. It prints one line
-per day. If the date is a weekend or US market holiday there is
+This fetches the **complete** filing set for that date (roughly 3,000
+accessions) and ingests the ones matching `FORMS`. The discovery step is a
+single request for the day's daily-index **master** file
+(`…/QTR{q}/master.{YYYYMMDD}.idx`), which lists each filing's form type and
+CIK; `FORMS` is applied to that list *before* any per-filing fetch, so each
+allow-listed accession's index page (and document) is fetched and only then.
+With the default `FORMS` this is ~380 index-page fetches rather than one per
+filing (see [ADR-003](../adr/ADR-003-master-index-discovery.md)). It prints
+one line per day. If the date is a weekend or US market holiday there is
 nothing to fetch and the command reports no documents.
 
 ## Backfill a range of days
@@ -72,8 +78,8 @@ ingest.exe backfill --from 2026-08-01 --to 2026-08-20
 ```
 
 Weekends are skipped directly; US market holidays are skipped because
-they have no sitemap. A `total` line with the aggregate stats prints
-at the end.
+they have no daily-index master file. A `total` line with the aggregate
+stats prints at the end.
 
 ## Ingest more or fewer forms
 

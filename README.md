@@ -19,7 +19,7 @@ ninfer, llama.cpp, or the cloud).
 ```mermaid
 flowchart TD
     subgraph SEC["SEC EDGAR — public APIs, no key, fair access"]
-        sitemap["Daily-index sitemaps<br/>complete per-business-day filings"]
+        master["Daily-index master file<br/>complete per-business-day filings + form type"]
         subs["Submissions JSON<br/>per-CIK filing history"]
         arch["Archives<br/>filing HTML + raw XML<br/>(primary_doc.xml, information_table.xml)"]
         tick["company_tickers.json<br/>ticker → CIK"]
@@ -48,7 +48,7 @@ flowchart TD
         holders["holders<br/>pure SQL, no LLM"]
     end
 
-    sitemap --> route
+    master --> route
     subs --> route
     arch --> route
     tick -.->|resolve CIK| route

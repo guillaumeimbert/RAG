@@ -1,7 +1,8 @@
 (** Minimal gzip (RFC 1952) decompressor on top of [zlib].
 
-    SEC EDGAR serves some static resources (notably the daily-index
-    sitemaps) gzip-compressed, either server-side or in response to
+    SEC EDGAR serves some static resources (notably the per-CIK submissions
+    JSON and the company-tickers file) gzip-compressed, either server-side or
+    in response to
     [Accept-Encoding: gzip]. OCaml's cohttp never negotiates or decodes
     gzip itself, so [Net] transparently decompresses any response body
     that starts with the gzip magic bytes via this module.

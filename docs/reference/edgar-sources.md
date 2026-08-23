@@ -8,22 +8,33 @@ default base URLs from
 
 ## Endpoints used by RAGuessLighter
 
-### Daily-index sitemaps — complete per-business-day filing lists
+### Daily-index master file — complete per-business-day filing list
 
 ```
-{SEC_DAILY_INDEX_BASE}/{YYYY}/QTR{q}/sitemap.{YYYYMMDD}.xml
+{SEC_DAILY_INDEX_BASE}/{YYYY}/QTR{q}/master.{YYYYMMDD}.idx
 ```
 
-- One `<loc>` entry per filing: the short index-page URL
-  `http://www.sec.gov/Archives/edgar/data/{cik}/{accession-dashed}-index.htm`.
-- **Complete** for the business day (~5,000 accessions in 2026-08).
-- `QTR{q}` is the **calendar** quarter (QTR1 = Jan–Mar, …, QTR4 =
-  Oct–Dec); the date-first URL form returns 403.
-- Served gzip only when `Accept-Encoding: gzip` is sent (~30×
-  smaller); the app requests gzip and decodes by magic bytes.
-- The same accession may appear under several CIK directories
-  (letter/anonymous filings); the app dedupes by accession.
+- A single pipe-delimited table, one row per (CIK, filing) event:
+  `CIK|Company Name|Form Type|Date Filed|File Name`, e.g.
+  `1045810|NVIDIA CORP|10-K|20260820|edgar/data/1045810/0001045810-26-000021.txt`.
+- **Complete** for the business day: the master and the (older) sitemap
+  cover the same accessions; the master lists ~3,000 distinct accessions in
+  2026-08, with the same accession repeated once per related CIK.
+- Carries the **form type** and the **CIK** directly, so the `FORMS`
+  allow-list is applied *before* any per-filing fetch — only allow-listed
+  accessions have their index page fetched. (An ~87% reduction in index-page
+  traffic versus fetching every filing's index page.)
+- `QTR{q}` is the **calendar** quarter (QTR1 = Jan–Mar, …, QTR4 = Oct–Dec);
+  the date-first URL form returns 403.
+- Parsed with a structural row detector (five pipe-separated fields, numeric
+  CIK, `YYYYMMDD` date, file name containing `/`), so header/separator
+  placement is irrelevant. Deduped by accession (first occurrence wins).
 - Used by: `ingest day`, `ingest backfill`.
+
+> ADR-001 originally chose the daily-index **sitemap**
+> (`sitemap.{YYYYMMDD}.xml`) for discovery; ADR-003 supersedes that with the
+> master file, which carries the form type and lets the pipeline pre-filter
+> before fetching index pages.
 
 ### Per-CIK submissions JSON — company filing history
 
@@ -103,6 +114,8 @@ https://www.sec.gov/files/company_tickers.json
   (`SCHEDULE 13G`); the app normalises to `13G` for matching and
   storage (`Ownership.norm_form`).
 
-See [ADR-001](../adr/ADR-001-ingest-discovery.md) for the
-discovery-source analysis and [ADR-002](../adr/ADR-002-heterogeneous-retrieval.md)
-for the ownership-source decisions.
+See [ADR-001](../adr/ADR-001-ingest-discovery.md) for the original
+discovery-source analysis, [ADR-002](../adr/ADR-002-heterogeneous-retrieval.md)
+for the ownership-source decisions, and
+[ADR-003](../adr/ADR-003-master-index-discovery.md) for the switch to the
+daily-index master file for discovery.

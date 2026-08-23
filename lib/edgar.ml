@@ -6,12 +6,13 @@
     - retries with backoff on 429/5xx (in [Net]).
 
     Sources (see docs/adr/ADR-001-ingest-discovery.md):
-    - daily-index sitemaps — the complete filing list per business day;
+    - daily-index master — the complete filing list per business day, with a
+      Form Type column used to pre-filter by [Config.forms];
     - filing index pages — metadata + primary document name;
     - per-CIK submissions JSON — full filing history of one company;
     - company-tickers.json — ticker -> CIK resolution. *)
 
-(** One filing as listed by a daily-index sitemap. *)
+(** One filing as listed by the daily-index master. *)
 type filing = {
   accession : string;
   (** e.g. 0000320193-25-000079 *)
@@ -37,8 +38,8 @@ type filing_index = {
   (** from the submissions JSON when available; "" otherwise *)
 }
 
-(** Raised when a sitemap is missing (holiday / weekend) or a page cannot
-    be parsed. *)
+(** Raised when the daily master index is missing (holiday / weekend) or a
+    page cannot be parsed. *)
 exception Failure of string
 
 let pad_cik cik = Stringx.pad_left ~length:10 ~with_:'0' cik
@@ -50,67 +51,122 @@ let sec_get cfg url =
   Net.get ~throttle ~headers:(Net.sec_headers ~user_agent:cfg.Config.sec_user_agent ()) url
 
 (* ------------------------------------------------------------------ *)
-(* Daily-index sitemaps -> filings of one day                           *)
+(* Daily-index master -> allow-listed filings of one day                    *)
 (* ------------------------------------------------------------------ *)
 
-let listing_url cfg day =
+(** [master_url cfg day] = the URL of the daily-index *master* [.idx] for
+    [day]. The daily index uses *calendar* quarters (QTR1 = Jan–Mar, QTR4 =
+    Oct–Dec); layout verified live 2026-08-22:
+    daily-index/{YYYY}/QTR{q}/master.{YYYYMMDD}.idx. The master index lists
+    the same filings as the sitemap (identical unique accessions) but also
+    carries the *Form Type*, which lets [master_of_day] pre-filter by
+    [Config.forms] before any index page is fetched. *)
+let master_url cfg day =
   let ymd =
     Printf.sprintf "%04d%02d%02d" day.Date.year day.Date.month day.Date.day
   in
   let year = Printf.sprintf "%04d" day.Date.year in
   let q = Date.quarter day in
-  (* Layout (verified live 2026-08-22): daily-index/{YYYY}/QTR{q}/sitemap.{YYYYMMDD}.xml.
-     The date-first form returns 403. *)
   cfg.Config.sec_daily_index_base
-  ^ "/" ^ year ^ "/QTR" ^ string_of_int q ^ "/sitemap." ^ ymd ^ ".xml"
+  ^ "/" ^ year ^ "/QTR" ^ string_of_int q ^ "/master." ^ ymd ^ ".idx"
 
-let https base =
-  if Stringx.starts_with base ~prefix:"http://"
-  then "https://" ^ Stringx.drop_prefix base ~prefix:"http://"
-  else base
+(** One row of the daily master index. The *Form Type* is already present,
+    which is what makes form pre-filtering possible. *)
+type master_row = {
+  cik : string;
+  company : string;
+  form_type : string;
+  date : string;
+  accession : string;
+}
 
-let filing_re =
-  Re.compile
-    Re.(seq [
-         str "<loc>";
-         group (Re.Pcre.re "https?://[^<]+");
-         str "/Archives/edgar/data/";
-         group (Re.Pcre.re "[0-9]+");
-         str "/";
-         group (Re.Pcre.re "[0-9]+-[0-9]+-[0-9]+");
-         str "-index.htm";
-         str "</loc>";
-       ])
+let is_digits s =
+  let l = String.length s in
+  if l = 0 then false
+  else
+    let r = ref true in
+    for i = 0 to l - 1 do
+      let c = String.get s i in
+      if c < '0' || c > '9' then r := false
+    done;
+    !r
 
-(** [parse_sitemap xml] parses a daily-index sitemap body into the filings
-    it lists (deduplicated on accession, document order). HTTP URLs are
-    upgraded to HTTPS. This is the pure core of [filings_of_day]; the
-    fixture test pins the sitemap format. *)
-let parse_sitemap (xml : string) : filing list =
-  let seen = ref (Hashtbl.create 4096) in
-  let filings = ref [] in
+(** [data_row_of line] recognizes one master-index data row by shape — five
+    pipe-separated fields, a numeric CIK, a YYYYMMDD date, and a file name
+    containing a directory — so the five header lines and the `---`
+    separator are skipped without hard-coding their position. The file name
+    is the canonical archive path ({cik}/{accession}.txt); the accession is
+    its base name with the [.txt] dropped. *)
+let data_row_of (line : string) : master_row option =
+  let parts = String.split_on_char '|' (String.trim line) in
+  match parts with
+  | [ cik; company; form; date; file ]
+    when is_digits cik && is_digits date && String.length date = 8
+         && String.contains file '/' ->
+    let comps = String.split_on_char '/' (String.trim file) in
+    let n = List.length comps in
+    if n < 2 then None
+    else
+      let base = List.nth comps (n - 1) in
+      Some
+        { cik = String.trim cik;
+          company = String.trim company;
+          form_type = String.trim form;
+          date = String.trim date;
+          accession =
+            if Stringx.ends_with base ~suffix:".txt"
+            then Stringx.drop_suffix base ~suffix:".txt"
+            else base; }
+  | _ ->
+    None
+
+(** [parse_master body] parses a daily master-index body into [master_row]s
+    (file order). Header lines and the separator are ignored by
+    [data_row_of]. This is the pure core of [master_of_day]; it does no I/O
+    and the fixture test pins the format. *)
+let parse_master (body : string) : master_row list =
+  List.filter_map data_row_of (String.split_on_char '\n' body)
+
+(** [master_filings cfg rows] = the [filing]s actually to fetch: rows whose
+    normalized form is in [cfg.forms] (or every row when forms is "ALL"),
+    deduplicated by accession (the master index lists the same accession
+    once per related CIK). Each [filing.index_url] is the index page on
+    [sec_archives_base]. This is where the pre-filter happens: ~3,000
+    rows/day shrink to the few hundred allow-listed ones before any index
+    page is requested. *)
+let master_filings cfg (rows : master_row list) : filing list =
+  let seen = Hashtbl.create 1024 in
+  let out = ref [] in
   List.iter
-    (fun g ->
-      let base = https (Re.Group.get g 1) in
-      let cik = Re.Group.get g 2 in
-      let acc = Re.Group.get g 3 in
-      if not (Hashtbl.mem !seen acc) then
-        ( Hashtbl.add !seen acc ();
-          filings
-            := { accession = acc; cik; index_url =
-                  base ^ "/Archives/edgar/data/" ^ cik ^ "/" ^ acc ^ "-index.htm" } :: !filings ))
-    (Re.all filing_re xml);
-  List.rev !filings
+    (fun r ->
+      if Config.forms_allow cfg r.form_type && not (Hashtbl.mem seen r.accession)
+      then
+        ( Hashtbl.add seen r.accession ();
+          out
+            := { accession = r.accession;
+                 cik = r.cik;
+                 index_url =
+                   cfg.Config.sec_archives_base ^ "/" ^ r.cik ^ "/"
+                   ^ r.accession ^ "-index.htm"; } :: !out ))
+    rows;
+  List.rev !out
 
-(** [filings_of_day cfg day] = every filing listed for [day] (all forms).
-    Raises [Failure] when the sitemap does not exist (holiday/weekend). *)
-let filings_of_day cfg (day : Date.t) : filing list Lwt.t =
-  let url = listing_url cfg day in
+(** [master_of_day cfg day] = every *allow-listed* filing listed for [day].
+    Fetches the master index once and pre-filters by [Config.forms] (via
+    [master_filings]); index pages are fetched later by the pipeline, only
+    for the survivors. Raises [Failure] when the master index does not
+    exist (holiday/weekend) or lists no rows. *)
+let master_of_day cfg (day : Date.t) : filing list Lwt.t =
+  let url = master_url cfg day in
   Lwt.catch
-    (fun () -> Lwt.bind (sec_get cfg url) (fun xml -> Lwt.return (parse_sitemap xml)))
+    (fun () ->
+      Lwt.bind (sec_get cfg url) (fun body ->
+        match parse_master body with
+        | [] -> Lwt.fail (Failure ("no filings found in master index for " ^ url))
+        | rows -> Lwt.return (master_filings cfg rows)))
     (function
       | Net.Http_error e when e.status = 404 ->
-        Lwt.fail (Failure ("no sitemap for " ^ Date.to_string day ^ " (holiday?)"))
+        Lwt.fail (Failure ("no master index for " ^ Date.to_string day ^ " (holiday?)"))
       | e -> Lwt.fail e)
 
 (* ------------------------------------------------------------------ *)

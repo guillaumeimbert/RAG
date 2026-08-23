@@ -69,7 +69,8 @@ let json_headers ?(user_agent = "raguesslighter/0.1") ?(auth = None) () :
 
 (** Headers for SEC EDGAR requests (the User-Agent is the fair-access
     contact identity, per https://www.sec.gov/os/fair-access). We ask for
-    gzip: the sitemaps shrink ~30x and [request] transparently decodes. *)
+    gzip: the submissions and tickers JSONs shrink substantially and
+    [request] transparently decodes. *)
 let sec_headers ~user_agent () =
   Cohttp.Header.of_list
     [ "User-Agent", user_agent

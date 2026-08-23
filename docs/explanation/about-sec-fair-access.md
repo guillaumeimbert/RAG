@@ -24,20 +24,24 @@ Verified live against the production endpoints in 2026-08:
   the SEC endpoints. The block is on the User-Agent, not the IP —
   the same machine, with a proper identifying User-Agent, gets 200s
   indefinitely.
-- **The daily-index sitemaps are the complete daily set** (~5,000
-  accessions per business day in 2026-08), but they are served in
-  their identity (uncompressed) form unless the client asks:
-  `Accept-Encoding: gzip` turns a ~1.08 MB sitemap into ~35 KB —
-  roughly a 30× reduction in the bytes every client has to move.
+- **The daily-index master file is the complete daily set** (~3,000
+  accessions per business day in 2026-08) and is a small plain-text table
+  that carries each filing's form type — so the pipeline pre-filters by
+  `FORMS` before fetching any index page (see ADR-003). The older sitemap
+  it replaces was served uncompressed unless the client sent
+  `Accept-Encoding: gzip` (~1.08 MB → ~35 KB, a ~30× reduction); the master
+  is small enough that encoding is a non-issue.
 - **The Archives are static.** Filing HTML and raw XML under
   `Archives/edgar/data/` are immutable once published; there is no
   cost to fetching a document twice and no reason not to cache.
 - **Scale math.** A single company's recent history is a few hundred
   documents; a full business day matching the default form set is a
-  few hundred; `FORMS=ALL` for a day is ~5,000 index pages plus one
+  few hundred; `FORMS=ALL` for a day is ~3,000 index pages plus one
   document fetch per filing. At the 10 req/s ceiling, a full `ALL`
-  day is a lower bound of ~10 minutes of polite fetching before
-  parsing and embedding are even considered.
+  day is a lower bound of ~5 minutes of polite fetching before
+  parsing and embedding are even considered. The default `FORMS`
+  allow-list pre-filters the master index first, so a default day is a
+  few hundred index pages rather than ~3,000.
 
 ## How the app behaves
 

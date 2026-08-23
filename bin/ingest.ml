@@ -1,7 +1,7 @@
 (** raguesslighter-ingest: pull SEC EDGAR filings into the vector store.
 
     Subcommands:
-      day DATE       one business day (discovery via daily-index sitemaps)
+      day DATE       one business day (discovery via the daily-index master)
       backfill ...   a range of days; weekends and holidays are skipped
       cik CIK        the recent filing history of one company
       ticker TICKER  same as cik, resolved via company-tickers.json

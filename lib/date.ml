@@ -26,7 +26,8 @@ let of_string s =
     then failwith ("invalid date: " ^ s)
     else { year; month; day }
 
-(** Parse an unseparated YYYYMMDD string (daily-index sitemap names). *)
+(** Parse an unseparated YYYYMMDD string (daily-index master names / the
+    master index Date Filed column). *)
 let of_yyyymmdd s =
   if String.length s <> 8 then failwith ("invalid YYYYMMDD date: " ^ s)
   else

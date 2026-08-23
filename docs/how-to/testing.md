@@ -93,6 +93,11 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   chunks the old check admitted — is upgraded by `0003_chunk_quality.sql`
   without failing: the migration removes the junk rows and installs the
   stronger regex `CHECK`; a fresh tab/newline-only insert is then rejected),
+- **master-index discovery pre-filter** (`ingest day`): the day's master
+  index is fetched once and the `FORMS` allow-list is applied to it before
+  any per-filing fetch, so the index pages of allow-listed filings are
+  fetched while the index pages of non-allow-listed filings (a Form 4 and a
+  424B2 in the mock) are provably **never requested**),
 - **CLI exit codes** (via the built binary, when `RAG_E2E_INGEST_BIN`
   is set).
 

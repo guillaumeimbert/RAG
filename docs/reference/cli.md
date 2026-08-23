@@ -23,7 +23,8 @@ Options: `-e FILE`, `-F, --force`.
 ### `ingest backfill --from DATE --to DATE`
 
 Ingest a range of business days, inclusive. Weekends are skipped
-directly; US market holidays have no sitemap and therefore no data. A `total` summary line is printed at the end.
+directly; US market holidays have no daily-index master file and therefore
+no data. A `total` summary line is printed at the end.
 
 Options: `-e FILE`, `--from=DATE` (required), `--to=DATE` (required), `-F, --force`.
 

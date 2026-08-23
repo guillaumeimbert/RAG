@@ -1,6 +1,8 @@
 # ADR-001 — Ingest discovery: daily-index sitemaps + submissions JSON
 
-**Status:** accepted (2026-08-22)
+**Status:** accepted (2026-08-22); the discovery mechanism (decision 1) is
+superseded by [ADR-003](ADR-003-master-index-discovery.md) (2026-08-22). The
+remaining decisions (2–5) stand.
 
 ## Context
 
@@ -45,8 +47,9 @@ Notes:
 
 ## Decision
 
-1. **Discovery** = daily-index sitemaps (backfill and daily increment);
-   per-CIK `submissions` JSON for targeted ingest.
+1. **Discovery** = ~~daily-index sitemaps~~ — superseded by ADR-003, which
+   uses the daily-index **master** file for day discovery. Per-CIK `submissions`
+   JSON remains the source for targeted `--cik`/`--ticker` ingest.
 2. **Documents** = filing index page → `primaryDocument` URL on
    `Archives/edgar/data/` (static, cacheable).
 3. **Dedupe** = upsert keyed on `(accession_number, chunk_index)`; re-runs are

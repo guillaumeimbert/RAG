@@ -10,8 +10,8 @@ goal is that the answer is "in this repository, before any user".
 RAGuesslighter sits on top of three external contracts it does not
 control:
 
-1. **EDGAR wire formats** — sitemap XML, submissions JSON, filing
-   index HTML, ownership XML (13G/13D/13F).
+1. **EDGAR wire formats** — the daily-index master file, submissions
+   JSON, filing index HTML, ownership XML (13G/13D/13F).
 2. **The OpenAI-compatible API** — embeddings and chat request/
    response shapes.
 3. **The database schema** — `schema/*.sql` and the SQL the app
@@ -23,13 +23,13 @@ failure is a pipeline that "works" and writes garbage.
 
 ## The two layers
 
-**Unit tests** (`test/test*.ml`, 202 cases) run each module against
+**Unit tests** (`test/test*.ml`, 229 cases) run each module against
 **fixtures that are actual captured responses**, not synthetic ones:
 real EDGAR index pages (NVDA/AAPL 10-K), a real 8-K HTML filing, a
-real daily-index sitemap in both plain and gzip encoding, a real
-submissions JSON, real 13G/13D/13F XML filings (NVDA→Nebius 13G,
-GameStop 13D, NVDA 13F cover + information table), `company_tickers.json`,
-and real OpenAI chat/embedding responses. A unit test passing means
+real daily-index master file, a real submissions JSON, real 13G/13D/13F
+XML filings (NVDA→Nebius 13G, GameStop 13D, NVDA 13F cover +
+information table), `company_tickers.json`, and real OpenAI
+chat/embedding responses. A unit test passing means
 the parser still understands *that document, byte for byte, plus the
 documented variations*. The fixtures are the pin: if EDGAR changes
 the format, the fixture still parses (good — the parser is

@@ -29,7 +29,7 @@ different file on a per-invocation basis.
 |---|---|---|
 | `SEC_USER_AGENT` | `Your Name <you@example.com>` | Sent as the `User-Agent` on every SEC request. The SEC requires a real contact; anonymous clients get HTTP 403. See [About SEC fair access](../explanation/about-sec-fair-access.md). |
 | `SEC_BROWSE_EDGAR_BASE` | `https://www.sec.gov/cgi-bin/browse-edgar` | Browse-EDGAR endpoint (current-filings sample). |
-| `SEC_DAILY_INDEX_BASE` | `https://www.sec.gov/Archives/edgar/daily-index` | Daily-index sitemaps (complete per-business-day filing lists). |
+| `SEC_DAILY_INDEX_BASE` | `https://www.sec.gov/Archives/edgar/daily-index` | Daily-index master file (complete per-business-day filing list, with form type + CIK). |
 | `SEC_SUBMISSIONS_BASE` | `https://data.sec.gov/submissions` | Per-CIK submission history JSON. |
 | `SEC_FTS_BASE` | `https://efts.sec.gov/LATEST/search-index` | EDGAR full-text search API (unused by v1 commands; available for backfill tooling). |
 | `SEC_ARCHIVES_BASE` | `https://www.sec.gov/Archives/edgar/data` | Static document store (filing HTML and raw XML). |

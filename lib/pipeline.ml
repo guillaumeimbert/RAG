@@ -1,9 +1,10 @@
 (** Ingestion pipeline: discover -> fetch -> parse -> chunk -> embed -> store.
 
     Entry points:
-    - [ingest_day]   — every filing of one business day (daily-index sitemap);
+    - [ingest_day]   — every *allow-listed* filing of one business day
+      (daily-index master, pre-filtered by [Config.forms]);
     - [ingest_range] — [ingest_day] over a date range, skipping weekends and
-      holidays (missing sitemaps);
+      holidays (missing master index);
     - [ingest_cik]   — the recent filing history of one company
       (submissions JSON; no index-page fetch).
 
@@ -314,7 +315,7 @@ let ingest_job_safe ?(force = false) (store : Store.t) (job : job) : job_result 
 let ingest_day ?(force = false) (store : Store.t) (day : Date.t) : stats Lwt.t =
   let cfg = store.Store.cfg in
   let stats = ref empty_stats in
-  Lwt.bind (Edgar.filings_of_day cfg day) (fun filings ->
+  Lwt.bind (Edgar.master_of_day cfg day) (fun filings ->
     Lwt_list.iter_s
       (fun f ->
         Lwt.bind (Edgar.filing_index_of cfg f) (fun index ->

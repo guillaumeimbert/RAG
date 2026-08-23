@@ -44,4 +44,5 @@ machinery, no opinions, consulted rather than read.
 - [About the test suite](explanation/about-testing.md)
 
 Decision records: [ADR-001 — ingest discovery](adr/ADR-001-ingest-discovery.md),
-[ADR-002 — heterogeneous retrieval](adr/ADR-002-heterogeneous-retrieval.md).
+[ADR-002 — heterogeneous retrieval](adr/ADR-002-heterogeneous-retrieval.md),
+[ADR-003 — master-index discovery](adr/ADR-003-master-index-discovery.md).

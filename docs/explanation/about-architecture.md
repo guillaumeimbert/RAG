@@ -8,14 +8,16 @@ the RAG part — that is a well-trodden path — but what *kind* of
 retrieval a document corpus like EDGAR actually needs. This document
 gives the tour; the decision records live in
 [ADR-001](../adr/ADR-001-ingest-discovery.md) (how filings are
-discovered) and [ADR-002](../adr/ADR-002-heterogeneous-retrieval.md)
-(why there are two retrieval paths).
+discovered), [ADR-002](../adr/ADR-002-heterogeneous-retrieval.md)
+(why there are two retrieval paths), and
+[ADR-003](../adr/ADR-003-master-index-discovery.md) (why discovery uses the
+daily-index master file rather than sitemaps).
 
 ## The shape of the system
 
 ```
 EDGAR ──► discover ──► fetch ──► parse ──┬─► chunk ──► embed ──► chunks (pgvector)
-             (sitemaps,    (HTML,    (text,        │
+             (master idx,   (HTML,    (text,        │
               submissions   XML)      XML)          │
               JSON)                                    ├─► ownership_events
                                                   └──► └─► holdings (SQL)
@@ -26,10 +28,11 @@ query ──► search / ask (prose)  +  holders / ask [SQL] (structured)
 Four stages, each with a single responsibility:
 
 1. **Discovery** (`lib/edgar.ml`) — which filings exist. Two sources:
-   the daily-index sitemaps (the *complete* per-business-day filing
-   set, for `day`/`backfill`) and the per-CIK submissions JSON (one
-   company's history, for `ticker`/`cik`). Why these two and not the
-   more famous "current filings" page: ADR-001.
+   the daily-index **master** file (the *complete* per-business-day filing
+   set, for `day`/`backfill`; it carries the form type so the `FORMS`
+   allow-list is applied before any index page is fetched) and the per-CIK
+   submissions JSON (one company's history, for `ticker`/`cik`). Why these
+   two, and why the master file rather than the sitemap: ADR-001 and ADR-003.
 2. **Fetch** (`lib/net.ml`, `lib/gz.ml`) — one HTTP client for
    everything: gzip by magic bytes, a static `User-Agent`, and
    `lwt_ssl` for HTTPS. EDGAR is plain HTTP/1.1 with static content;
@@ -101,7 +104,7 @@ Full argument and limits: [About heterogeneous retrieval](about-heterogeneous-re
 | `lib/net.ml` | HTTP client (gzip, user agent, ssl) |
 | `lib/gz.ml` | gzip inflate (magic-byte detected) |
 | `lib/date.ml` | date parsing/formatting |
-| `lib/edgar.ml` | discovery endpoints, index parsing, submissions JSON, ticker→CIK |
+| `lib/edgar.ml` | master-index discovery, index parsing, submissions JSON, ticker→CIK |
 | `lib/html_text.ml` | filing HTML → heading-aware text blocks |
 | `lib/chunk.ml` | block → chunk (size/overlap) |
 | `lib/openai.ml` | embeddings + chat (OpenAI-compatible) |

@@ -51,6 +51,48 @@ let pg_available () : bool =
 
 let fixture name = Test_fixtures.read_text (Test_fixtures.fix name)
 
+(* Daily master index served by the EDGAR mock for the ingest_day pre-filter
+   test (see step 10). It lists two allow-listed 10-K filings (whose index
+   pages the mock serves) plus a Form 4 and a 424B2 (NOT allow-listed, whose
+   index pages the mock does not serve — so if they were fetched they would
+   404; the pre-filter must avoid fetching them at all). The two unwanted
+   filings use fresh CIK/accessions not used anywhere else in the e2e. *)
+let master_idx_e2e =
+  "Description:           Daily Index of EDGAR Dissemination Feed\n"
+  ^ "Last Data Received:    Aug 20, 2026\n"
+  ^ "Comments:              webmaster@sec.gov\n"
+  ^ "Anonymous FTP:         ftp://ftp.sec.gov/edgar/\n"
+  ^ " \n"
+  ^ "CIK|Company Name|Form Type|Date Filed|File Name\n"
+  ^ "--------------------------------------------------------------------------------\n"
+  ^ "1045810|NVIDIA CORP|10-K|20260820|edgar/data/1045810/0001045810-26-000021.txt\n"
+  ^ "320193|Apple Inc.|10-K|20260820|edgar/data/320193/0000320193-25-000079.txt\n"
+  ^ "9999999|ZETA CORP|4|20260820|edgar/data/9999999/0009999999-26-000900.txt\n"
+  ^ "8888888|ETA CORP|424B2|20260820|edgar/data/8888888/0008888888-26-000901.txt"
+
+(* Track which index-page paths the EDGAR mock serves, so the e2e can prove
+   the master-index pre-filter avoided fetching unwanted index pages. The
+   mock handler runs in its own thread, so the list is guarded by a mutex. *)
+let edgar_index_requests : string list ref = ref []
+let edgar_index_mu = Mutex.create ()
+let is_index_path (path : string) =
+  let suf = "-index.htm" in
+  let n = String.length path in
+  let l = String.length suf in
+  n >= l && String.sub path (n - l) l = suf
+let record_index_request (path : string) =
+  Mutex.lock edgar_index_mu;
+  edgar_index_requests := path :: !edgar_index_requests;
+  Mutex.unlock edgar_index_mu
+(* Drain the recorded index-page requests (oldest first) and reset the list,
+   so a test inspects exactly the requests made in its own window. *)
+let drain_index_requests () =
+  Mutex.lock edgar_index_mu;
+  let xs = List.rev !edgar_index_requests in
+  edgar_index_requests := [];
+  Mutex.unlock edgar_index_mu;
+  xs
+
 (** [find_sub s sub] = index of the first occurrence of [sub] in [s]. *)
 let find_sub (s : string) (sub : string) : int option =
   let n = String.length sub in
@@ -203,9 +245,13 @@ let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
     xml (fixture "13g_nvda.xml")
   | "/Archives/edgar/data/1045810/000104581026000093/primary_doc.xml" ->
     xml (fixture "13g_nvda.xml")
+  (* daily master index for the ingest_day pre-filter test (step 10) *)
+  | "/2026/QTR3/master.20260820.idx" ->
+    Some { Mock.code = 200; content_type = "text/plain"; body = master_idx_e2e }
   | _ -> None)
 
 let edgar_handler (path : string) (_body : string) : Mock.resp option =
+  if is_index_path path then record_index_request path;
   (match !edgar_fault with
   | Some code ->
     Some { Mock.code = code; content_type = "text/html"; body = "fault-injected" }
@@ -998,6 +1044,50 @@ let () =
         check "migrate: after upgrade a whitespace-only chunk is rejected (regex constraint active)"
           !now_rejected;
         pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";") );
+
+      (* 10. master-index discovery pre-filter: ingest_day fetches the daily
+         master index ONCE and pre-filters rows by FORMS, so each accession's
+         index page is fetched only for allow-listed filings. The mock lists
+         two 10-K filings (allow-listed; their index pages are served) plus a
+         Form 4 and a 424B2 (NOT allow-listed; their index pages are not
+         served, so if fetched they would 404 — the pre-filter must avoid
+         fetching them). Index-page requests are tracked so the test can prove
+         the two unwanted pages were never requested. Runs on a dedicated
+         database so the main scratch store is undisturbed. *)
+      let master_db = "raguesslighter_e2e_master" in
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ master_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ master_db ^ ";");
+      pg_exec master_db schema;
+      pg_exec master_db schema2;
+      pg_exec master_db schema3;
+      let mcfg =
+        {
+          cfg
+          with Config.database_url =
+            Printf.sprintf "postgresql://%s:%s@%s:%d/%s" pg_user pg_pass pg_host pg_port
+              master_db;
+        }
+      in
+      let mstore = Lwt_main.run (Store.create mcfg) in
+      ignore (drain_index_requests ());  (* clear any prior windows *)
+      let sm = Lwt_main.run (Pipeline.ingest_day mstore (Date.of_string "2026-08-20")) in
+      Printf.printf "  ingest_day (master)   %s\n%!" (Pipeline.show_stats sm);
+      check "ingest_day (master): two allow-listed 10-K filings ingested" (sm.Pipeline.docs = 2);
+      check "ingest_day (master): nothing failed" (sm.Pipeline.failed = 0);
+      let idx_reqs = drain_index_requests () in
+      let req p = List.mem p idx_reqs in
+      check "ingest_day (master): NVDA 10-K index page fetched"
+        (req "/Archives/edgar/data/1045810/0001045810-26-000021-index.htm");
+      check "ingest_day (master): AAPL 10-K index page fetched"
+        (req "/Archives/edgar/data/320193/0000320193-25-000079-index.htm");
+      (* the pre-filter must have avoided fetching the non-allow-listed
+         filings' index pages (Form 4 and 424B2) *)
+      check "ingest_day (master): Form 4 index page NOT fetched (pre-filtered)"
+        (not (req "/Archives/edgar/data/9999999/0009999999-26-000900-index.htm"));
+      check "ingest_day (master): 424B2 index page NOT fetched (pre-filtered)"
+        (not (req "/Archives/edgar/data/8888888/0008888888-26-000901-index.htm"));
+      Lwt_main.run (Store.close mstore);
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ master_db ^ ";");
 
       (* cleanup *)
       Lwt_main.run (Store.close store);

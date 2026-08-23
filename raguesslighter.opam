@@ -4,7 +4,7 @@ synopsis:
   "RAG over SEC EDGAR filings: OCaml + Postgres/pgvector + any OpenAI-compatible inference server"
 description: """
 Ingests SEC EDGAR filings through the official public APIs (daily-index
-  sitemaps, per-CIK submissions JSON, static Archives documents), chunks
+  master file, per-CIK submissions JSON, static Archives documents), chunks
   the documents and embeds them through an OpenAI-compatible HTTP API
   (vLLM, ninfer, llama.cpp or a cloud provider), stores the vectors in
   PostgreSQL/pgvector and answers questions with grounded retrieval.

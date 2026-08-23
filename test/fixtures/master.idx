@@ -1,0 +1,19 @@
+Description:           Daily Index of EDGAR Dissemination Feed
+Last Data Received:    Aug 20, 2026
+Comments:              webmaster@sec.gov
+Anonymous FTP:         ftp://ftp.sec.gov/edgar/
+ 
+CIK|Company Name|Form Type|Date Filed|File Name
+--------------------------------------------------------------------------------
+1045810|NVIDIA CORP|10-K|20260820|edgar/data/1045810/0001045810-26-000021.txt
+320193|Apple Inc.|10-K/A|20260820|edgar/data/320193/0000320193-25-000079.txt
+1045810|NVIDIA CORP|8-K|20260820|edgar/data/1045810/0001045810-26-000100.txt
+1000275|ROYAL BANK OF CANADA|424B2|20260820|edgar/data/1000275/0000950103-26-012663.txt
+804328|Microsoft Corp|4|20260820|edgar/data/804328/0000804328-26-000999.txt
+1045810|NVIDIA CORP|SCHEDULE 13G|20260820|edgar/data/1045810/0001045810-26-000062.txt
+320193|Apple Inc.|SC 13D|20260820|edgar/data/320193/0000320193-26-000050.txt
+502232|ALPHABET INC|6-K|20260820|edgar/data/502232/0001564590-26-000444.txt
+1045810|NVIDIA CORP|13F-HR|20260820|edgar/data/1045810/0001045810-26-000065.txt
+320193|Apple Inc.|N-PX|20260820|edgar/data/320193/0000320193-26-000010.txt
+804328|Microsoft Corp|144|20260820|edgar/data/804328/0000804328-26-001000.txt
+1045810|NVIDIA CORP|10-K|20260820|edgar/data/1045810/0001045810-26-000021.txt
