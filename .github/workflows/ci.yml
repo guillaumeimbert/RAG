@@ -35,37 +35,29 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config curl \
+            build-essential pkg-config \
             libpq-dev libssl-dev zlib1g-dev libffi-dev
 
       - name: Set up OCaml
-        run: |
-          curl -fsSL https://install.opam.org/opam-installer.sh -o opam-installer.sh
-          bash opam-installer.sh --disable-sandboxing -y
-          eval $(opam env)
-          opam init --bare --yes --disable-sandboxing
-          opam switch create 5.5.0 --yes
-          eval $(opam env)
-          ocaml -version
-          dune --version || true
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-version: '5.5.0'
 
       - name: Install OCaml dependencies
         run: |
-          eval $(opam env)
-          opam install . --deps-only --yes
+          # --with-test is required: alcotest is a {with-test} dependency,
+          # so the test executables cannot build without it.
+          opam install . --deps-only --with-test --yes
 
       - name: Build
-        run: |
-          eval $(opam env)
-          dune build
+        run: dune build
 
       - name: Unit tests
-        run: |
-          eval $(opam env)
-          ./_build/default/test/test.exe
+        run: ./_build/default/test/test.exe
 
       - name: End-to-end tests (against Postgres)
         run: |
-          eval $(opam env)
+          # Point the e2e test at the real ingest binary so the CLI
+          # exit-code subtest runs.
           export RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe"
           ./_build/default/test/e2e.exe

@@ -85,5 +85,13 @@ let tests : (string * unit T.test_case list) list =
             T.check T.string "mismatch" expected (Stringx.utf8_prefix acc 101));
         T.test_case "prefix shorter than n is unchanged" `Quick (fun () ->
             T.check T.string "mismatch" "ab\xc3\xa9" (Stringx.utf8_prefix "ab\xc3\xa9" 10));
+        T.test_case "end-of-string is a valid boundary (n = length)" `Quick (fun () ->
+            (* n = the full length (4 for "ab\xc3\xa9"): the cut point is the
+               end of the string; it must not read s.[length] (out of bounds). *)
+            T.check T.int "mismatch" 4 (Stringx.utf8_boundary_before "ab\xc3\xa9" 4));
+        T.test_case "n past the end clamps to the end boundary" `Quick (fun () ->
+            T.check T.int "mismatch" 4 (Stringx.utf8_boundary_before "ab\xc3\xa9" 99));
+        T.test_case "prefix with n >= length returns the whole string" `Quick (fun () ->
+            T.check T.string "mismatch" "ab\xc3\xa9" (Stringx.utf8_prefix "ab\xc3\xa9" 4));
       ] );
   ]

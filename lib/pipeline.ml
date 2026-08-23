@@ -147,7 +147,7 @@ let ingest_prose_filing ?force (store : Store.t) (job : job) : job_result Lwt.t 
   Lwt.bind (Edgar.get_document store.Store.cfg job.primary_url) (fun html ->
     Lwt.bind (embed_blocks store (Html_text.of_html html)) (fun embedded ->
       let rows = chunk_rows job.index embedded in
-      Lwt.bind (Store.upsert_chunks ?force store rows) (fun () ->
+      Lwt.bind (Store.upsert_chunks ?force store job.index.accession rows) (fun () ->
         Lwt.return (Ingested { chunks = List.length rows; events = 0; positions = 0 }))))
 
 (** 13G / 13D: raw XML -> structured ownership events; the narrative
@@ -181,7 +181,7 @@ let ingest_13gd ?force (store : Store.t) (job : job) : job_result Lwt.t =
     in
     Lwt.bind embedded (fun emb ->
       let ch_rows = chunk_rows index emb in
-      Lwt.bind (Store.upsert_13gd ?force store ev_rows ch_rows) (fun () ->
+      Lwt.bind (Store.upsert_13gd ?force store index.accession ev_rows ch_rows) (fun () ->
         Lwt.return (Ingested { chunks = List.length ch_rows; events = List.length ev_rows; positions = 0 }))))
 
 (** 13F-HR: raw XML -> structured holdings. Issuer CIKs are resolved
@@ -248,7 +248,7 @@ let ingest_13f ?force (store : Store.t) (job : job) : job_result Lwt.t =
             ; vote_none = p.vote_none })
           t13f.positions ciks
       in
-      Lwt.bind (Store.upsert_holdings ?force store rows) (fun () ->
+      Lwt.bind (Store.upsert_holdings ?force store index.accession rows) (fun () ->
         Lwt.return (Ingested { chunks = 0; events = 0; positions = List.length rows }))))
 
 (** Route one filing to its pipeline by form class. *)

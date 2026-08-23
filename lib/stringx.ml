@@ -73,8 +73,16 @@ let replace s ~sub ~by =
     continuation byte [10xxxxxx]); the function backs off from [n] to the
     nearest such point. (End-of-string and byte 0 are valid boundaries.) *)
 let utf8_boundary_before (s : string) (n : int) : int =
-  let i = ref (min n (String.length s)) in
-  while !i > 0 && (Char.code (String.get s !i) land 0xC0) = 0x80 do
+  let len = String.length s in
+  (* A position [i] is a valid cut point when it begins a character: byte 0,
+     the end of the string, or a byte that is NOT a UTF-8 continuation byte
+     (10xxxxxx). Checking [i = len] first keeps the end-of-string boundary
+     valid without reading s.[len]. *)
+  let is_boundary i =
+    i = 0 || i = len || (Char.code (String.get s i) land 0xC0) <> 0x80
+  in
+  let i = ref (min n len) in
+  while !i > 0 && not (is_boundary !i) do
     decr i
   done;
   !i

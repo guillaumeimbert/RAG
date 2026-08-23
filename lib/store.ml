@@ -573,14 +573,13 @@ let upsert_chunks_on (conn : Caqti_lwt.connection) (rows : chunk_row list) :
   in
   go (split_rows upsert_batch rows)
 
-(** [upsert_chunks] stores chunk rows. With [~force:true] the document's
-    existing rows are deleted first, in the *same* transaction, so a
-    re-ingest fully replaces what was previously stored instead of leaving
-    stale rows behind. [doc_id] comes from the first row (all rows of one
-    filing share an accession); with an empty [rows] there is nothing to
-    replace, so the delete is skipped. *)
-let upsert_chunks ?(force = false) t (rows : chunk_row list) : unit Lwt.t =
-  let doc_id = (match rows with r :: _ -> r.doc_id | [] -> "") in
+(** [upsert_chunks] stores chunk rows for one document. With [~force:true]
+    the document's existing rows are deleted first, in the *same*
+    transaction, so a re-ingest fully replaces what was previously stored
+    instead of leaving stale rows behind. [doc_id] (the accession) is passed
+    by the caller — it must NOT be derived from [rows]: a forced re-ingest
+    that now parses to zero rows must still clear the old rows. *)
+let upsert_chunks ?(force = false) t (doc_id : string) (rows : chunk_row list) : unit Lwt.t =
   with_tx t (fun conn ->
     if force && doc_id <> ""
     then
@@ -645,17 +644,16 @@ let upsert_own_events t (rows : own_event_row list) : unit Lwt.t =
 
 (** Store the ownership events AND the narrative chunks of one 13G/13D
     filing in a single transaction: both are stored, or neither is.
-    [~force:true] deletes the filing's existing rows first, in the same
-    transaction, so a re-ingest fully replaces them. *)
-let upsert_13gd ?(force = false) t (events : own_event_row list) (chunks : chunk_row list) : unit Lwt.t =
-  let doc_id =
-    (match events, chunks with
-     | e :: _, _ -> e.accession
-     | [], c :: _ -> c.doc_id
-     | [], [] -> "")
-  in
+    [~force:true] deletes the filing's existing rows first (keyed on the
+    caller-supplied [doc_id], not on the rows, so a zero-row re-ingest still
+    clears the old data), in the same transaction, so a re-ingest fully
+    replaces them. *)
+let upsert_13gd ?(force = false) t (doc_id : string) (events : own_event_row list) (chunks : chunk_row list) : unit Lwt.t =
   with_tx t (fun conn ->
-    let write =
+    (* [write] is a thunk: Lwt promises start when they are constructed, so
+       the write must not be started before the forced delete finishes, or
+       it would run concurrently with the delete on the same connection. *)
+    let write () =
       Lwt.bind (upsert_own_events_on conn events) (function
         | Ok () -> upsert_chunks_on conn chunks
         | Error _ as r -> Lwt.return r)
@@ -663,9 +661,9 @@ let upsert_13gd ?(force = false) t (events : own_event_row list) (chunks : chunk
     if force && doc_id <> ""
     then
       Lwt.bind (delete_filing_on conn doc_id) (function
-        | Ok () -> write
+        | Ok () -> write ()
         | Error _ as r -> Lwt.return r)
-    else write)
+    else write ())
 
 (** Bulk upsert of holdings rows (13F positions). *)
 let upsert_holdings_on (conn : Caqti_lwt.connection) (rows : holding_row list) :
@@ -680,10 +678,10 @@ let upsert_holdings_on (conn : Caqti_lwt.connection) (rows : holding_row list) :
   go (split_rows upsert_batch rows)
 
 (** Store 13F position rows. [~force:true] deletes the filing's existing
-    holdings first, in the same transaction, so a re-ingest fully replaces
-    them. *)
-let upsert_holdings ?(force = false) t (rows : holding_row list) : unit Lwt.t =
-  let doc_id = (match rows with r :: _ -> r.accession | [] -> "") in
+    holdings first (keyed on the caller-supplied [doc_id], so a zero-position
+    re-ingest still clears the old rows), in the same transaction, so a
+    re-ingest fully replaces them. *)
+let upsert_holdings ?(force = false) t (doc_id : string) (rows : holding_row list) : unit Lwt.t =
   with_tx t (fun conn ->
     if force && doc_id <> ""
     then

@@ -593,7 +593,7 @@ let () =
       let () =
         Lwt_main.run
           (Lwt.catch
-             (fun () -> Store.upsert_13gd store [ ev ] [ bad_chunk ])
+             (fun () -> Store.upsert_13gd store "atom-test" [ ev ] [ bad_chunk ])
              (function
                | Store.Db _ -> (atom_raised := true; Lwt.return_unit)
                | e -> (atom_raised := true; Lwt.fail e)))
@@ -618,6 +618,81 @@ let () =
       check "force: forced re-ingest is Ingested (bypasses the check)"
         (match r3 with Pipeline.Ingested _ -> true | _ -> false);
       check "force: rows replaced, not duplicated" (count_where "chunks" force_doc = n1);
+
+      (* 7k. forced re-ingest with ZERO new rows still deletes the old rows:
+         the replacement is keyed on the accession (doc_id), not on the
+         output rows. Regression: deriving the accession from the rows made
+         an empty re-ingest skip the delete and leave the old data behind
+         (empty prose, or a 13F whose information table disappeared). *)
+      let zdoc = "0001045810-26-000099" in
+      let zrow =
+        {
+          Store.doc_id = zdoc;
+          company = "X";
+          cik = "1";
+          ticker = "";
+          form = "8-K";
+          filed_at = "2026-09-01";
+          section = "s";
+          chunk_index = 0;
+          text = "zero-row probe";
+          embedding = Store.vector_to_string (mock_vector "zero-row probe");
+        }
+      in
+      let () = Lwt_main.run (Store.upsert_chunks store zdoc [ zrow ]) in
+      check "force zero rows: first write stored" (count_where "chunks" zdoc = 1);
+      let () = Lwt_main.run (Store.upsert_chunks ~force:true store zdoc []) in
+      check "force zero rows: old rows deleted by a forced empty re-ingest"
+        (count_where "chunks" zdoc = 0);
+
+      (* 7l. forced 13G/D re-ingest: the events AND the narrative chunks are
+         replaced (not duplicated), and a forced zero-row re-ingest clears
+         both. Exercises the upsert_13gd force path directly — the delete
+         must complete before the (thunked) write starts on the same
+         connection, and the delete is keyed on the accession, not the rows. *)
+      let gdoc = "0001045810-26-000098" in
+      let gevent () =
+        {
+          Store.accession = gdoc;
+          form = "13G";
+          event_date = "2026-09-01";
+          filed_at = "2026-09-01";
+          filer_cik = "1045810";
+          filer_name = "NVIDIA";
+          subject_cik = "1513845";
+          subject_name = "NEBIUS";
+          subject_cusip = "";
+          class_name = "Class A";
+          shares = Some 100;
+          percent = Some 5.0;
+          passive = true;
+          is_amendment = false;
+          index_url = "";
+        }
+      in
+      let gchunk () =
+        {
+          Store.doc_id = gdoc;
+          company = "X";
+          cik = "1045810";
+          ticker = "";
+          form = "13G";
+          filed_at = "2026-09-01";
+          section = "s";
+          chunk_index = 0;
+          text = "13gd force probe";
+          embedding = Store.vector_to_string (mock_vector "13gd force probe");
+        }
+      in
+      let () = Lwt_main.run (Store.upsert_13gd store gdoc [ gevent () ] [ gchunk () ]) in
+      check "force 13gd: first write stored"
+        (count_where "ownership_events" gdoc = 1 && count_where "chunks" gdoc = 1);
+      let () = Lwt_main.run (Store.upsert_13gd ~force:true store gdoc [ gevent () ] [ gchunk () ]) in
+      check "force 13gd: rows replaced, not duplicated"
+        (count_where "ownership_events" gdoc = 1 && count_where "chunks" gdoc = 1);
+      let () = Lwt_main.run (Store.upsert_13gd ~force:true store gdoc [] []) in
+      check "force 13gd: zero-row re-ingest clears events and chunks"
+        (count_where "ownership_events" gdoc = 0 && count_where "chunks" gdoc = 0);
 
       (* 7j. CLI exit codes (the real ingest binary, as a subprocess): a run
          with failed filings exits non-zero; a clean run and a bad date
