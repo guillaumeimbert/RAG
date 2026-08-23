@@ -956,6 +956,49 @@ let () =
         Printf.printf
           "  ..  CLI exit-code test skipped (set RAG_E2E_INGEST_BIN to the built ingest binary)\n%!" );
 
+      (* 9. migration upgrade: a database created with the OLD space-only
+         btrim constraint (and therefore possibly holding tab/newline-only
+         junk chunks that the old check admitted) must be upgraded by 0003
+         WITHOUT failing. 0003 drops the old constraint, removes the junk
+         rows the old one admitted, and installs the stronger regex check.
+         The pre-fix migration (no cleanup) would fail here, because
+         ADD CONSTRAINT validates the stronger check against every existing
+         row. Runs on a dedicated database so it cannot disturb the main
+         scratch store. *)
+      let migrate_db = "raguesslighter_e2e_migrate" in
+      let junk_vec = Store.vector_to_string (List.init embed_dim (fun _ -> 0.0)) in
+      let migrate_ok = ref true in
+      let now_rejected = ref false in
+      let junk_count () =
+        (match pg_query migrate_db "SELECT count(*)::int FROM chunks WHERE NOT (text ~ '[^[:space:]]')" with
+         | [ [ n ] ] -> int_of_string n | _ -> -1)
+      in
+      ( pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+        pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+        pg_exec migrate_db schema;  (* 0001, dimension rewritten to 8 *)
+        (* install the OLD (space-only) constraint, as an earlier 0003 would have *)
+        pg_exec migrate_db
+          "ALTER TABLE chunks ADD CONSTRAINT chunks_text_nonempty CHECK (btrim(text) <> '');";
+        (* the old space-only check ADMITS a tab/newline-only chunk: btrim strips
+           spaces only, so the tab/newline survive and btrim(text) <> '' holds. *)
+        pg_exec migrate_db
+          ("INSERT INTO chunks (doc_id, company, cik, form, filed_at, chunk_index, text, embedding) "
+           ^ "VALUES ('migrate-junk', 'X', '999', '10-K', '2026-01-01', 0, E'\\t\\n', '" ^ junk_vec ^ "'::vector)");
+        check "migrate: the old (space-only) constraint admitted a tab/newline-only chunk" (junk_count () = 1);
+        (* apply the NEW 0003: it must succeed on this old database. *)
+        (try pg_exec migrate_db schema3 with _ -> migrate_ok := false);
+        check "migrate: 0003 upgrades an old-constraint database without failing" !migrate_ok;
+        check "migrate: the whitespace-only junk chunk was removed" (junk_count () = 0);
+        (* the regex constraint is now active: a fresh whitespace-only insert is rejected. *)
+        (try
+           pg_exec migrate_db
+             ("INSERT INTO chunks (doc_id, company, cik, form, filed_at, chunk_index, text, embedding) "
+              ^ "VALUES ('migrate-junk2', 'X', '999', '10-K', '2026-01-01', 1, E'\\t\\n  \\t', '" ^ junk_vec ^ "'::vector)");
+         with _ -> now_rejected := true);
+        check "migrate: after upgrade a whitespace-only chunk is rejected (regex constraint active)"
+          !now_rejected;
+        pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";") );
+
       (* cleanup *)
       Lwt_main.run (Store.close store);
       Option.iter (fun s -> s ()) !edgar_sock;

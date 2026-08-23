@@ -88,6 +88,11 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   within `CHUNK_SIZE`, and free of section markers and leaked HTML tags;
   the database itself rejects a whitespace-only chunk via its `CHECK`
   constraint and never stores it),
+- **schema migration upgrade** (a database that was created with the old
+  space-only `btrim` constraint — and so may hold tab/newline-only junk
+  chunks the old check admitted — is upgraded by `0003_chunk_quality.sql`
+  without failing: the migration removes the junk rows and installs the
+  stronger regex `CHECK`; a fresh tab/newline-only insert is then rejected),
 - **CLI exit codes** (via the built binary, when `RAG_E2E_INGEST_BIN`
   is set).
 

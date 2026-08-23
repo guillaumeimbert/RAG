@@ -26,9 +26,14 @@ One row per text chunk of one filing. Written by the ingest pipeline
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |
 
 Constraints/indexes: `UNIQUE (doc_id, chunk_index)` (ingest
-idempotency); `CHECK (btrim(text) <> '')` (a chunk must carry
-non-whitespace text, added by `0003_chunk_quality.sql` — the database
-itself rejects an empty or whitespace-only chunk, not just the chunker);
+idempotency); `CHECK (text ~ '[^[:space:]]')` (a chunk must carry at least
+one non-whitespace character, added by `0003_chunk_quality.sql` — the
+database itself rejects an empty or whitespace-only chunk, not just the
+chunker. The POSIX `[^[:space:]]` class covers spaces, tabs, newlines and
+the other blanks, which a `btrim` (spaces-only) check would miss. The
+migration is corrective: it replaces an earlier space-only constraint and
+removes any whitespace-only rows the old one admitted, so it cannot fail on
+pre-existing data);
 `chunks_embedding_hnsw` on `embedding`
 (`vector_cosine_ops`) — created only when `N ≤ 2000` (pgvector
 HNSW limit), otherwise retrieval falls back to sequential scan;
