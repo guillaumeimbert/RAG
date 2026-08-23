@@ -38,9 +38,9 @@ time="..." level=info msg="raguesslighter-db started"
 The container starts PostgreSQL 17 with the pgvector extension and
 creates the schema automatically on its very first run (a warning
 about the HNSW index may appear only if your embedding dimension is
-above 4000 — the half-precision mirror makes HNSW available up to 4000
-dims, which covers the reference 2560; above that, retrieval uses a
-sequential scan).
+above 4000 -- the halfvec expression index makes HNSW available up to
+4000 dims, which covers the reference 2560; above that, retrieval uses
+a sequential scan).
 
 Check it:
 

@@ -67,10 +67,19 @@ podman compose exec -T db psql -U raguesslighter -d raguesslighter \
 ```
 
 When the index is (re)built on a large store, pgvector builds the HNSW graph
-in shared memory; if the graph exceeds `maintenance_work_mem` it warns
-`hnsw graph no longer fits into maintenance_work_mem` and produces a
-lower-quality (still functional) index. The `db` service sets `shm_size: 1g`
-for this reason; for a very large store, rebuild with a larger budget:
+in shared memory. Two separate settings govern this:
+- `maintenance_work_mem` (Postgres GUC, default 64 MB) is the build budget.
+  If the graph exceeds it, pgvector warns
+  `hnsw graph no longer fits into maintenance_work_mem` and the build spills
+  to disk -- SLOWER, but the index quality is unchanged.
+- `shm_size` (the container `/dev/shm`) must cover the build's shared
+  memory. Podman's default 64 MB is too small for the reference 2560-dim
+  width, so the `db` service sets `shm_size: 1g` (a too-small /dev/shm fails
+  the build with "No space left on device"). Raising `shm_size` does NOT
+  raise `maintenance_work_mem`.
+
+To speed up a one-off build of a large store, raise the budget (the 1g
+`shm_size` already covers it):
 
 ```sh
 podman compose exec -T db psql -U raguesslighter -d raguesslighter \
@@ -105,9 +114,9 @@ This cannot be done with `ALTER` in place. Steps:
 
 1. Stop ingesting.
 2. Update `EMBEDDING_DIM` (and `EMBEDDING_MODEL`) in `.env`.
-3. Update the `vector(N)` and `halfvec(N)` literals in
-   `schema/0001_init.sql` to match (`0004_halfvec_hnsw.sql` reads the
-   dimension from the column, so it carries no literal).
+3. Update the `vector(N)` literal in `schema/0001_init.sql` to match (the
+   HNSW index is an expression on `embedding::halfvec(N)`, so `N` is read
+   from the column at migration time; there is no second literal to update).
 4. Reset the store (above) so the `chunks` columns are recreated at the
    new dimension.
 5. Re-ingest.
@@ -118,3 +127,11 @@ dims, but the schema indexes the half-precision EXPRESSION
 reference 2560 (and any width up to 4000) gets a real HNSW index. Only
 above 4000 does retrieval fall back to a sequential scan (correct, just
 slower; fine at typical store sizes).
+
+### pgvector version
+
+The filtered-search path sets the `hnsw.iterative_scan` GUC so that a
+selective metadata filter does not silently return too few rows. That GUC
+requires **pgvector ≥ 0.8.0**. The pinned image (`pgvector/pgvector:pg17`)
+ships pgvector 0.8.x; the e2e suite checks the installed extension version
+and fails fast if it is older.

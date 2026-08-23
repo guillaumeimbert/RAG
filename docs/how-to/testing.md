@@ -89,7 +89,21 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   indexable); the test confirms there is no generated mirror column, that the
   HNSW index is the halfvec expression, that candidate retrieval is an Index
   Scan, and that `0004_halfvec_hnsw.sql` converts an old-style database
-  (generated mirror column) to the expression index,
+  (generated mirror column + the old HNSW index on that column) to the
+  expression index,
+- **recall@k**: the indexed search's top-k is compared (as a set) against the
+  exact top-k from a sequential scan ordered by the full-precision embedding;
+  the test requires Recall@5 >= 0.8 (the ANN candidate set is approximate, so
+  a single row can legitimately fall outside it; a much stronger check than
+  "the best hit beats the 5th"),
+- **filtered HNSW iterative scan**: on a 10000-row corpus where the matching
+  rows sit far from the query in vector-space, the test proves (a) the filtered
+  query takes the HNSW expression-index path and (b) without
+  `hnsw.iterative_scan` the single-pass scan returns too few rows while
+  `strict_order` (what the search sets) returns the full top-k,
+- **pgvector version**: the e2e checks the installed pgvector extension is
+  >= 0.8.0 (the `hnsw.iterative_scan` GUC the filtered search relies on was
+  introduced in 0.8.0) and fails fast if it is older,
 - **structured retrieval** (latest-event-per-filer selection,
   previous-event deltas, multiple filers, amendment flag),
 - **chunk quality / data integrity** (every stored chunk is nonempty,

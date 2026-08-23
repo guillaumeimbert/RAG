@@ -15,4 +15,5 @@ let () =
     @ Test_net.tests
     @ Test_xml.tests
     @ Test_ownership.tests
-    @ Test_grounding.tests )
+    @ Test_grounding.tests
+    @ Test_store.tests )

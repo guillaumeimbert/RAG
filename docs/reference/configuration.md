@@ -21,7 +21,7 @@ different file on a per-invocation basis.
 | `OPENAI_EMBED_BASE_URL` | *(unset)* | Base URL of a separate embeddings server. When unset, `OPENAI_BASE_URL` is used. |
 | `OPENAI_EMBED_API_KEY` | *(unset)* | Key for the embeddings server. When unset, `OPENAI_API_KEY` is used. |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Model name for `embeddings`. |
-| `EMBEDDING_DIM` | `2560` | Output dimension. **Must equal** the `vector(N)` and `halfvec(N)` columns in `schema/0001_init.sql`. The HNSW index is on the half-precision mirror and is created when N ≤ 4000. |
+| `EMBEDDING_DIM` | `2560` | Output dimension. **Must equal** the `vector(N)` column in `schema/0001_init.sql`. The HNSW index is an expression index on `(embedding::halfvec(N))` and is created when N ≤ 4000 (the halfvec limit). |
 
 ## SEC EDGAR
 

@@ -167,6 +167,34 @@ let parse_vec (s : string) : float list =
     done;
     (if !cur <> "" then acc := float_of_string !cur :: !acc; List.rev !acc)
 
+(** [in_str s sub] — substring test ([String.contains] only tests a single
+    character). Used to assert on plan/index text. *)
+let in_str (s : string) (sub : string) : bool =
+  let n = String.length sub in
+  if n = 0 then true
+  else
+    let i = ref 0 and r = ref false in
+    while !i + n <= String.length s && not !r do
+      if String.sub s !i n = sub then r := true else incr i
+    done;
+    !r
+
+(** [version_at_least a b] — true when dotted version [a] ("N.N[.N]") is >= [b].
+    Missing components count as 0. *)
+let version_at_least (a : string) (b : string) : bool =
+  let parse (s : string) : int list =
+    String.split_on_char '.' s
+    |> List.map (fun p -> (try int_of_string p with _ -> 0))
+  in
+  let rec cmp (la : int list) (lb : int list) : bool =
+    match la, lb with
+    | [], [] -> true
+    | [], _ -> false
+    | _, [] -> true
+    | xa :: ta, xb :: tb -> if xa > xb then true else if xa < xb then false else cmp ta tb
+  in
+  cmp (parse a) (parse b)
+
 (** Read query rows as strings (for asserting on stored data). *)
 let pg_query dbname sql : string list list =
   let c =
@@ -350,6 +378,19 @@ let () =
       pg_exec scratch_db schema4;
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;
 
+      (* pgvector >= 0.8.0 is required: the filtered-search path relies on the
+         hnsw.iterative_scan GUC (introduced in 0.8.0). Older extension
+         versions would make the set_config call fail; fail fast with a clear
+         message instead. *)
+      let pgvec_ver =
+        (match pg_query scratch_db "SELECT extversion FROM pg_extension WHERE extname = 'vector'" with
+         | [ [v] ] -> v
+         | _ -> "0")
+      in
+      check "pgvector >= 0.8.0 (required for hnsw.iterative_scan)"
+        (version_at_least pgvec_ver "0.8.0");
+      Printf.printf "e2e: pgvector %s\n%!" pgvec_ver;
+
       (* Make 429/5xx retry loops (fault injection) finish instantly. *)
       Net.set_backoff_scale 0.0;
 
@@ -484,28 +525,33 @@ let () =
 
       (* 4a. recall: widening the inner LIMIT to candidate_k (then reranking the
          candidates with the full-precision embedding) must not lose the true
-         top results. The indexed search's best hit (full-precision similarity)
-         must be at least as good as the exact sequential search's 5th-best
-         hit — i.e. the widened candidate set keeps the top-k that a naive
-         inner `LIMIT top_k` would have. *)
-      let exact_sim_at (i : int) : float =
-        (match
-           pg_query scratch_db
-             (Printf.sprintf
-                "SELECT (1 - (embedding <=> '%s'::vector))::float8 FROM chunks ORDER BY embedding <=> '%s'::vector ASC LIMIT 1 OFFSET %d"
-                query
-                query
-                i)
-         with
-         | [ [s] ] -> float_of_string s
-         | _ -> 0.0)
+         top results. Compute Recall@k — the fraction of the EXACT top-k (a
+         sequential scan ordered by the full-precision embedding) that appear in
+         the indexed search's top-k. A naive inner `LIMIT top_k`, or a candidate
+         set too small to contain the exact top-k, would drop some of them and
+         score < 1.0. Checking only that the best hit beats the 5th would still
+         pass while missing the other four. *)
+      let recall_at (k : int) : float =
+        let exact_ids =
+          List.concat
+            (pg_query scratch_db
+               (Printf.sprintf
+                  "SELECT id::int FROM chunks ORDER BY embedding <=> '%s'::vector ASC LIMIT %d"
+                  query
+                  k))
+        in
+        let indexed_ids = List.map (fun (h : Store.hit) -> string_of_int h.Store.id) hits in
+        let inter = List.filter (fun i -> List.mem i exact_ids) indexed_ids in
+        (float_of_int (List.length inter)) /. (float_of_int k)
       in
-      let exact_5th = exact_sim_at 4 in
-      let indexed_best =
-        (match hits with [] -> 0.0 | h :: _ -> h.Store.similarity)
-      in
-      check "search: recall — indexed best hit beats the exact 5th (top-k kept)"
-        (indexed_best >= exact_5th -. 1e-6);
+      (* Recall@5 against an exact sequential-scan top-5. The ANN candidate set
+         (candidate_k = 25 of the 27 scratch chunks, half-precision ordering) is
+         approximate, so a single chunk can legitimately fall outside it; require
+         at least 4 of the 5 exact rows (a much stronger check than "the best
+         hit beats the 5th", which only validated one row). *)
+      let r5 = recall_at 5 in
+      check "search: Recall@5 >= 0.8 (indexed top-5 covers the exact top-5)"
+        (r5 >= 0.8);
 
       let n_8k =
         (match pg_query scratch_db "SELECT count(*)::int FROM chunks WHERE form = '8-K'" with
@@ -534,6 +580,94 @@ let () =
       check "search: broad 10-K filter returns the correct count (all 10-K)"
         (n_10k > 0 && List.length h10k = min 50 n_10k
          && List.for_all (fun (h : Store.hit) -> h.Store.form = "10-K") h10k);
+
+      (* 4a''. filtered HNSW iterative scan: on a corpus where the matching rows
+         sit FAR from the query in vector-space, a single-pass HNSW scan
+         (hnsw.iterative_scan = off) finds none of them, so the filtered query
+         returns too few; the strict_order scan (what Store.search sets) keeps
+         iterating until enough candidates pass the filter. The search query
+         shape is exercised directly with the index FORCED (enable_seqscan off):
+         the planner otherwise prefers a sequential scan for filtered queries on
+         small tables, which would hide the HNSW behaviour under test. *)
+      let filt_db = "raguesslighter_e2e_filtered" in
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ filt_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ filt_db ^ ";");
+      pg_exec filt_db "CREATE EXTENSION IF NOT EXISTS vector;";
+      (* chunks table WITHOUT the HNSW index: the index is built after the bulk
+         insert (a single build pass) rather than one HNSW insert per row. *)
+      pg_exec filt_db
+        (Printf.sprintf
+           "CREATE TABLE chunks (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, doc_id TEXT NOT NULL, company TEXT NOT NULL, cik TEXT NOT NULL, ticker TEXT, form TEXT NOT NULL, filed_at DATE NOT NULL, section TEXT, chunk_index INT NOT NULL, text TEXT NOT NULL, embedding vector(%d) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (doc_id, chunk_index))"
+           embed_dim);
+      (* 10000 chunks: the 10-K rows lie along the query axis, the 8-K rows are
+         ORTHOGONAL to it, so the HNSW scan (ordered by distance to the query)
+         reaches the 8-K rows only by iterating past the near 10-K rows. 100 of
+         the 8-K rows make the filter selective (1%). *)
+      pg_exec filt_db
+        ("INSERT INTO chunks (doc_id, company, cik, form, filed_at, chunk_index, text, embedding)\n"
+         ^ "SELECT 'd' || g, 'COMP', '1', CASE WHEN g % 100 = 0 THEN '8-K' ELSE '10-K' END,\n"
+         ^ "       '2026-01-01', g % 1000, 'x',\n"
+         ^ "       CASE WHEN g % 100 = 0\n"
+         ^ "         THEN array_to_vector(ARRAY[0.0, 1.0, sin(g)*0.01, cos(g)*0.01, 0,0,0,0], "
+         ^ string_of_int embed_dim ^ ", false)\n"
+         ^ "         ELSE array_to_vector(ARRAY[1.0, 0.0, sin(g)*0.01, cos(g)*0.01, 0,0,0,0], "
+         ^ string_of_int embed_dim ^ ", false) END\n"
+         ^ "FROM generate_series(1, 10000) g;");
+      pg_exec filt_db
+        (Printf.sprintf
+           "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw ((embedding::halfvec(%d)) halfvec_cosine_ops);"
+           embed_dim);
+      let n_8k_filt =
+        (match pg_query filt_db "SELECT count(*)::int FROM chunks WHERE form = '8-K'" with
+         | [ [s] ] -> int_of_string s
+         | _ -> 0)
+      in
+      check "filtered HNSW: 100 8-K rows present (selective filter, non-vacuous)"
+        (n_8k_filt = 100);
+      (* The exact Store.search query shape: inner LIMIT candidate_k (= 50 for
+         top_k = 20), outer LIMIT top_k (= 20). *)
+      let qv =
+        "[" ^ (String.concat "," (List.init embed_dim (fun i -> if i = 0 then "1" else "0"))) ^ "]"
+      in
+      let filt_sql =
+        "SELECT id::int FROM (SELECT id, 1 - (embedding <=> '" ^ qv ^ "'::vector) AS similarity "
+        ^ "FROM chunks WHERE ('' = '' OR cik = '') AND ('' = '8-K' OR form = '8-K') AND ('' = '' OR ticker = '') "
+        ^ "ORDER BY (embedding::halfvec(" ^ string_of_int embed_dim ^ ")) <=> '" ^ qv ^ "'::halfvec("
+        ^ string_of_int embed_dim ^ ") LIMIT 50) ranked "
+        ^ "WHERE 0.0 = 0.0 OR similarity >= 0.0 ORDER BY similarity DESC LIMIT 20"
+      in
+      (* (a) the planner takes the HNSW expression-index path for the FILTERED
+          query (Index Scan + the form filter), not a sequential scan. *)
+      let filt_plan =
+        String.concat " "
+          (List.concat (pg_query filt_db ("SET enable_seqscan = off; EXPLAIN (COSTS OFF) " ^ filt_sql)))
+      in
+      check "filtered HNSW: the filtered query uses the HNSW index (Index Scan + form filter)"
+        (in_str filt_plan "Index Scan" && in_str filt_plan "chunks_embedding_hnsw"
+         && in_str filt_plan "form = '8-K'");
+      (* (b/c) the effect of hnsw.iterative_scan on the forced HNSW scan, with
+         the same ef_search (100) as Store.search. Session-level SETs (no
+         transaction) on a single connection, so they apply to the SELECT; the
+         connection is closed afterwards, so nothing leaks. *)
+      let filt_count mode =
+        (match
+           pg_query filt_db
+             ("SET enable_seqscan = off; SET hnsw.iterative_scan = '" ^ mode ^ "'; "
+              ^ "SET hnsw.ef_search = 100; SELECT count(*)::int FROM (" ^ filt_sql ^ ") s;")
+         with
+         | [ [s] ] -> int_of_string s
+         | _ -> 0)
+      in
+      (* Without iterative scanning a single pass finds no 8-K row (the bug):
+          the filtered HNSW scan returns too few. *)
+      let count_off = filt_count "off" in
+      check "filtered HNSW: without iterative_scan the filtered HNSW scan returns too few"
+        (count_off < 20);
+      (* With iterative_scan = strict_order (what Store.search sets) the scan
+          iterates until enough candidates pass the filter -> the full top-k. *)
+      check "filtered HNSW: iterative_scan=strict_order returns the full top-k"
+        (filt_count "strict_order" = 20);
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ filt_db ^ ";");
 
       (* 4b. structured ownership retrieval (SQL path) *)
       let holders = Lwt_main.run (Store.holders_of store ~subject_cik:"0001513845" ~limit:10) in
@@ -703,16 +837,6 @@ let () =
          (Index Scan when seqscan is disabled), and (d) the 0004 migration
          converts an old-style database (generated mirror column) to the
          expression index. *)
-      let in_str (s : string) (sub : string) : bool =
-        let n = String.length sub in
-        if n = 0 then true
-        else
-          let i = ref 0 and r = ref false in
-          while !i + n <= String.length s && not !r do
-            if String.sub s !i n = sub then r := true else incr i
-          done;
-          !r
-      in
       let is_one (rows : string list list) : bool =
         (match rows with [ ["1"] ] -> true | _ -> false)
       in
@@ -743,8 +867,9 @@ let () =
       check "halfvec: candidate retrieval uses the HNSW index (Index Scan)"
         (in_str plan "Index Scan" && in_str plan "chunks_embedding_hnsw");
       (* 0004 migration: an old-style database (full-precision column +
-         generated halfvec mirror) is converted to the expression index: the
-         mirror is dropped and the index rebuilt on the cast. *)
+         generated halfvec mirror + the OLD HNSW index built on that mirror
+         column) is converted to the expression index: the mirror is dropped
+         (taking the old index with it) and the index rebuilt on the cast. *)
       let hv_db = "raguesslighter_e2e_hv" in
       let old_chunks_ddl =
         Printf.sprintf
@@ -756,14 +881,27 @@ let () =
       pg_exec pg_main_db ("CREATE DATABASE " ^ hv_db ^ ";");
       pg_exec hv_db "CREATE EXTENSION IF NOT EXISTS vector;";
       pg_exec hv_db old_chunks_ddl;
+      (* a few rows + the OLD HNSW index on the generated mirror column (the
+         index an old database actually carried). *)
+      pg_exec hv_db
+        (Printf.sprintf
+           "INSERT INTO chunks (doc_id, company, cik, form, filed_at, chunk_index, text, embedding) SELECT 'd' || g, 'C', '1', '10-K', '2026-01-01', g %% 100, 'x', array_to_vector(ARRAY[1,0,0,0,0,0,0,0], %d, false) FROM generate_series(1, 20) g;"
+           embed_dim);
+      pg_exec hv_db
+        (Printf.sprintf
+           "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding_hv halfvec_cosine_ops);");
       check "halfvec: old-style DB has the generated mirror before 0004"
         (hv_col_present hv_db);
+      let old_idx = idx_of hv_db in
+      check "halfvec: old-style DB carries the old HNSW index on the mirror column"
+        (in_str old_idx "hnsw" && in_str old_idx "embedding_hv" && not (in_str old_idx "::halfvec"));
       pg_exec hv_db (Test_fixtures.read_text (Test_fixtures.schema_file "0004_halfvec_hnsw.sql"));
       check "halfvec: 0004 drops the generated mirror"
         (not (hv_col_present hv_db));
       let hv_idx = idx_of hv_db in
-      check "halfvec: 0004 creates the halfvec expression index"
-        (in_str hv_idx "hnsw" && in_str hv_idx "::halfvec" && in_str hv_idx "halfvec_cosine_ops");
+      check "halfvec: 0004 replaces the old index with the halfvec expression index"
+        (in_str hv_idx "hnsw" && in_str hv_idx "::halfvec" && in_str hv_idx "halfvec_cosine_ops"
+         && not (in_str hv_idx "embedding_hv"));
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ hv_db ^ ";");
 
       (* 5. ticker resolution *)

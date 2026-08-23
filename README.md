@@ -37,7 +37,7 @@ flowchart TD
     end
 
     subgraph DB["PostgreSQL 17 + pgvector"]
-        chunks[("chunks<br/>vector(2560) + halfvec mirror + HNSW")]
+        chunks[("chunks<br/>vector(2560) + halfvec HNSW index")]
         events[("ownership_events<br/>13G / 13D")]
         holdings[("holdings<br/>13F positions")]
     end
@@ -137,7 +137,8 @@ vendor/ vendored SQL-query ppx (rapper)
 - **SEC fair access**: static `SEC_USER_AGENT` with contact info,
   ≤ 10 req/s, no API key.
 - **Embedding dimension**: `EMBEDDING_DIM` must match the
-  `vector(N)` / `halfvec(N)` columns in `schema/0001_init.sql` (2560 =
-  qwen3-embedding-4b; HNSW on the half-precision mirror when N ≤ 4000).
+  `vector(N)` column in `schema/0001_init.sql` (2560 =
+  qwen3-embedding-4b; HNSW expression index on the halfvec cast when
+  N ≤ 4000).
 - **No in-process models**: inference is entirely behind
   `OPENAI_BASE_URL`; swapping servers changes one line in `.env`.

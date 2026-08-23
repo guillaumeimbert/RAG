@@ -21,9 +21,14 @@ services:
     ports:
       - "5432:5432"
     # The halfvec HNSW index (see schema/0004_halfvec_hnsw.sql) builds its
-    # graph in shared memory; the reference 2560-dim width needs more than
-    # the 64 MB podman default or pgvector warns that the graph no longer
-    # fits maintenance_work_mem (a lower-quality, still-functional index).
+    # graph in shared memory. Podman's default /dev/shm is 64 MB, which is too
+    # small for the build at the reference 2560-dim width ("could not resize
+    # shared memory segment ... No space left on device"); shm_size: 1g gives
+    # the build room. NOTE: this does NOT raise maintenance_work_mem (still the
+    # 64 MB default) -- if the graph exceeds that budget the build simply
+    # spills, which SLOWS construction (it does not reduce index quality). To
+    # speed up a one-off build: SET maintenance_work_mem = '1GB' before
+    # CREATE INDEX / REINDEX (shm_size must cover it, hence 1g).
     shm_size: 1g
     volumes:
       - raguesslighter_pgdata:/var/lib/postgresql/data

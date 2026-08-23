@@ -605,6 +605,20 @@ let upsert_chunks ?(force = false) t (doc_id : string) (rows : chunk_row list) :
         | Error _ as r -> Lwt.return r)
     else upsert_chunks_on conn rows)
 
+(** [candidate_of top_k] — the number of ANN candidates the inner query
+    retrieves before the full-precision rerank. It is always AT LEAST [top_k]
+    (so the outer [LIMIT top_k] can actually return [top_k] results — a cap
+    below [top_k] would silently truncate the answer) and larger (5x, capped at
+    50) to give the rerank room to recover the true nearest neighbours that
+    half-precision ordering displaced. For [top_k > 50] the candidate set is
+    [top_k] itself (no extra buffer, but never fewer than requested). Raises
+    [Invalid_argument] for [top_k < 1]. Pure and side-effect free so the
+    boundaries are unit-testable. *)
+let candidate_of (top_k : int) : int =
+  if top_k < 1
+  then invalid_arg "Store.candidate_of: top_k must be >= 1"
+  else max top_k (min 50 (top_k * 5))
+
 (** Vector search with optional metadata filters (empty/None = no filter). *)
 let search t ~query ~top_k ?(cik : string option = None) ?(form : string option = None) ?(ticker : string option = None) ?(min_similarity : float = 0.0) () :
     hit list Lwt.t =
@@ -612,8 +626,9 @@ let search t ~query ~top_k ?(cik : string option = None) ?(form : string option 
   let n = string_of_int dim in
   (* Widen the ANN candidate set so the full-precision rerank (the outer
      [ORDER BY similarity]) can recover the true nearest neighbours that
-     half-precision ordering displaced: at least 5, or 5x top_k, capped at 50. *)
-  let candidate_k = max 5 (min 50 (top_k * 5)) in
+     half-precision ordering displaced. candidate_of guarantees it is >= top_k,
+     so --top-k N can always return N hits. *)
+  let candidate_k = candidate_of top_k in
   let ef_search = max candidate_k 100 in
   let cik_s = Option.value ~default:"" cik in
   let form_s = Option.value ~default:"" form in
