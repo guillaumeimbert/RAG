@@ -388,33 +388,57 @@ let validate_history (migs : migration list) (applied : (int * string) list)
   let applied_versions = List.map fst applied in
   validate_history_versions local_versions applied_versions
 
-(** Verify the database has the latest schema (the fingerprint columns of the
-    most recent migrations). Used by [baseline] to refuse an empty or
-    partially-initialized database. Checks the key columns that only exist
-    after all migrations have been applied. *)
+(** The legacy schema version that the [verify_schema] fingerprint
+    corresponds to. [baseline] records the migrations up to and including
+    this version (and no further); a database whose schema matches the
+    fingerprint is adopted as the baseline, and [up] applies the later
+    migrations. When a new migration is added, extend the fingerprint to
+    cover it and bump this version. *)
+let baseline_version : int = 6
+
+(** The number of schema elements the fingerprint expects (3 tables, 3 key
+    columns, the 0003 chunk-quality constraint, and the 0004 HNSW index). *)
+let fingerprint_elements : int = 8
+
+(** Verify the database has the baseline schema ([baseline_version]).
+    A minimal, clearly-scoped heuristic: it checks the public tables, the
+    key columns that only exist after migrations 0005/0006, the 0003
+    chunk-quality constraint, and the 0004 HNSW index. Used by [baseline]
+    to refuse an empty or partially-initialized database. All checks are
+    qualified to the public schema so a table of the same name elsewhere
+    cannot satisfy them. *)
 let verify_schema (conn : Caqti_lwt.connection) : (unit, string) result Lwt.t =
   let req =
     let open Caqti_request.Infix in
     let open Caqti_type.Std in
     ( ->! ) unit int
-      ( "SELECT count(*) FROM information_schema.columns WHERE \n"
-      ^ "  (table_name = 'chunks' AND column_name = 'embedding') OR \n"
-      ^ "  (table_name = 'holdings' AND column_name = 'position_index') OR \n"
-      ^ "  (table_name = 'ownership_events' AND column_name = 'event_index')" )
+      ( "SELECT"
+      ^ " (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'chunks')"
+      ^ " + (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'holdings')"
+      ^ " + (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'ownership_events')"
+      ^ " + (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chunks' AND column_name = 'embedding')"
+      ^ " + (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'holdings' AND column_name = 'position_index')"
+      ^ " + (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ownership_events' AND column_name = 'event_index')"
+      ^ " + (SELECT count(*) FROM pg_constraint WHERE connamespace = 'public'::regnamespace AND conname = 'chunks_text_nonempty')"
+      ^ " + (SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'chunks_embedding_hnsw')" )
   in
   let module C = (val conn : Caqti_lwt.CONNECTION) in
   Lwt.catch
     (fun () ->
       Lwt.bind (C.find req ()) (function
         | Ok count ->
-          (if count = 3 then Lwt.return (Ok ())
+          (if count = fingerprint_elements then Lwt.return (Ok ())
            else Lwt.return
                  (Error ("baseline refused: the database has " ^ string_of_int count
-                         ^ " of the 3 expected schema fingerprint columns (chunks.embedding, "
-                         ^ "holdings.position_index, ownership_events.event_index); the schema "
-                         ^ "is empty or partial — run 'migrate up' instead of 'baseline' on this database")))
+                         ^ " of the " ^ string_of_int fingerprint_elements
+                         ^ " expected schema elements (public tables chunks/holdings/ownership_events; "
+                         ^ "columns chunks.embedding, holdings.position_index, "
+                         ^ "ownership_events.event_index; the chunks_text_nonempty constraint; and the "
+                         ^ "chunks_embedding_hnsw index); the schema is empty or partial — run "
+                         ^ "'migrate up' instead of 'baseline' on this database")))
         | Error e -> Lwt.return (Error (Caqti_error.show e))))
     (fun e -> Lwt.return (Error (Printexc.to_string e)))
+
 (** The migrations not yet recorded (in ascending order). *)
 let pending_of (migs : migration list) (applied : (int * string) list) : migration list =
   let applied_versions = List.map fst applied in
@@ -489,42 +513,55 @@ let status (url : string) : (string, string) result Lwt.t =
                 (String.concat "\n" lines
                  ^ Printf.sprintf "\n%d applied, %d pending" (List.length applied) (List.length pending)))))))
 
-(** Record the current migration files as applied without re-running them
-    (the one-time transition for databases created before the tracker
-    existed). Refuses an empty or partially-initialized database (the schema
-    fingerprint columns must all be present) and a file whose recorded
-    checksum no longer matches. The applied history must be a valid prefix. *)
+(** Record the migration files up to and including [baseline_version] as
+    applied without re-running them (the one-time transition for databases
+    created before the tracker existed, at the schema version that the
+    [verify_schema] fingerprint corresponds to). It refuses an empty or
+    partially-initialized database (the schema elements must all be present),
+    a file whose recorded checksum no longer matches, and any migration file
+    beyond [baseline_version] (the fingerprint does not cover it — run [up]
+    instead, or extend the fingerprint and bump [baseline_version]). The
+    applied history must be a valid prefix. *)
 let baseline (url : string) : (string, string) result Lwt.t =
   (match migration_files schema_dir with
   | Error msg -> Lwt.return (Error msg)
   | Ok migs ->
-    with_db url (fun conn ->
-      Lwt.bind (applied_map conn) (function
-        | Error msg -> Lwt.return (Error msg)
-        | Ok applied ->
-          (match validate_history migs applied with
+    (match List.find_opt (fun m -> m.version > baseline_version) migs with
+    | Some m ->
+      Lwt.return
+        (Error ("baseline supports schema version <= " ^ string_of_int baseline_version
+                ^ " but " ^ m.name ^ " (version " ^ string_of_int m.version ^ ") is present; the "
+                ^ "schema fingerprint does not cover it — run 'migrate up' instead, or extend "
+                ^ "verify_schema and bump baseline_version"))
+    | None ->
+      with_db url (fun conn ->
+        Lwt.bind (applied_map conn) (function
           | Error msg -> Lwt.return (Error msg)
-          | Ok () ->
-            Lwt.bind (verify_schema conn) (function
-              | Error msg -> Lwt.return (Error msg)
-              | Ok () ->
-                let rec go (acc : string) = function
-                  | [] -> Lwt.return (Ok (String.trim acc ^ " — baseline complete"))
-                  | m :: rest ->
-                    let step () : (string, string) result Lwt.t =
-                      (match List.assoc_opt m.version applied with
-                      | Some cs ->
-                        let cs_now = checksum m.path in
-                        if cs_now <> cs then
-                          Lwt.return (Error ("migration " ^ m.name ^ " changed after being applied; cannot baseline"))
-                        else Lwt.return (Ok ("skipped (already recorded) " ^ m.name))
-                      | None -> record_one conn m)
-                    in
-                    Lwt.bind (step ()) (function
-                      | Error msg -> Lwt.return (Error msg)
-                      | Ok line -> go (acc ^ line ^ "\n") rest)
-                in
-                go "" migs)))))
+          | Ok applied ->
+            (match validate_history migs applied with
+            | Error msg -> Lwt.return (Error msg)
+            | Ok () ->
+              Lwt.bind (verify_schema conn) (function
+                | Error msg -> Lwt.return (Error msg)
+                | Ok () ->
+                  let to_record = List.filter (fun m -> m.version <= baseline_version) migs in
+                  let rec go (acc : string) = function
+                    | [] -> Lwt.return (Ok (String.trim acc ^ " — baseline complete"))
+                    | m :: rest ->
+                      let step () : (string, string) result Lwt.t =
+                        (match List.assoc_opt m.version applied with
+                        | Some cs ->
+                          let cs_now = checksum m.path in
+                          if cs_now <> cs then
+                            Lwt.return (Error ("migration " ^ m.name ^ " changed after being applied; cannot baseline"))
+                          else Lwt.return (Ok ("skipped (already recorded) " ^ m.name))
+                        | None -> record_one conn m)
+                      in
+                      Lwt.bind (step ()) (function
+                        | Error msg -> Lwt.return (Error msg)
+                        | Ok line -> go (acc ^ line ^ "\n") rest)
+                  in
+                  go "" to_record))))))
 
 (** Apply the migrations with [version < upto] (a prefix of the migration
     list), recording each. Opens its own connection and takes the advisory

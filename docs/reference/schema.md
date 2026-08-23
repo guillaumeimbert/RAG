@@ -1,8 +1,8 @@
 # Database schema reference
 
 PostgreSQL 17 with the `vector` extension (pgvector). Schema files in
-`schema/` run automatically on first database initialization; apply
-them manually on existing databases (see
+`schema/` are applied by `dune exec bin/migrate.exe -- up` (the sole schema
+authority); they are recorded in the `schema_migrations` table (see
 [How to manage the database](../how-to/database.md)).
 
 ## `chunks` — prose retrieval

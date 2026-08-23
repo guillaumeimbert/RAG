@@ -35,21 +35,32 @@ You will see a line like:
 time="..." level=info msg="raguesslighter-db started"
 ```
 
-The container starts PostgreSQL 17 with the pgvector extension and
-creates the schema automatically on its very first run (a warning
-about the HNSW index may appear only if your embedding dimension is
-above 4000 -- the halfvec expression index makes HNSW available up to
-4000 dims, which covers the reference 2560; above that, retrieval uses
-a sequential scan).
+The container starts PostgreSQL 17 with the pgvector extension. It does
+**not** create the schema: `dune exec bin/migrate.exe -- up` is the sole
+schema authority (it applies the `schema/*.sql` files and records them).
 
-Check it:
+Check it, then apply the schema once it accepts connections:
 
 ```sh
 podman compose ps
 ```
 
 You will notice `raguesslighter-db` listed as **healthy** after a few
-seconds.
+seconds. `up -d` does not wait for that healthcheck, so wait for Postgres to
+accept connections before running the migration (bounded to ~30 s):
+
+```sh
+for i in $(seq 30); do
+  podman compose exec -T db pg_isready -U raguesslighter >/dev/null 2>&1 && break
+  sleep 1
+done
+dune exec bin/migrate.exe -- up
+```
+
+(a warning about the HNSW index may appear only if your embedding dimension
+is above 4000 -- the halfvec expression index makes HNSW available up to 4000
+dims, which covers the reference 2560; above that, retrieval uses a
+sequential scan).
 
 If the container does not start, the usual cause is port 5432 being
 taken by another Postgres. Stop it (`podman compose down`) once the

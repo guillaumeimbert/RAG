@@ -160,8 +160,12 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   `0006_event_index.sql`), for the ingest/query flow; the migration-tool
   tests use `Migration.up` / `Migration.snapshot_up_to` on a separate
   database. If you add `schema/0007_*.sql`, the migration tests pick it up
-  automatically (they apply every file), and the ingest/query apply list in
-  `test/e2e.ml` must be extended too.
+  automatically (`Migration.up` applies every file), and the ingest/query
+  apply list in `test/e2e.ml` must be extended too. Because `migrate
+  baseline` is tied to a fixed `baseline_version` (currently 6) and a
+  `verify_schema` fingerprint of that schema, a new migration must also bump
+  `baseline_version` and extend the fingerprint in `lib/migration.ml` before
+  `baseline` can certify it.
 - Fault injection makes 429/5xx retry loops finish instantly
   (`Net.set_backoff_scale 0.0` in the test), so a run that would
   otherwise retry for ~15 s per request completes in milliseconds.

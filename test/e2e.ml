@@ -510,6 +510,33 @@ let () =
       let () = Lwt_main.run (Lwt.join [ j1; j2 ]) in
       check "migration up (concurrent): both succeed"
         (match (!up1, !up2) with Ok _, Ok _ -> true | _ -> false);
+      (* (h) an early checksum mismatch is an error (immutability guard):
+         tamper with 0001, expect up to refuse, then restore the file. *)
+      let with_tampered_file (f : string) (action : unit -> unit) : unit =
+        let orig =
+          In_channel.with_open_text f (fun ic -> really_input_string ic (in_channel_length ic))
+        in
+        let restore () = Out_channel.with_open_text f (fun oc -> output_string oc orig) in
+        Out_channel.with_open_text f (fun oc -> output_string oc (orig ^ "-- tampered\n"));
+        (try action () with e -> (restore (); raise e));
+        restore ()
+      in
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      let _ = Lwt_main.run (Migration.up migrate_url) in
+      with_tampered_file "schema/0001_init.sql" (fun () ->
+          let up_tampered = Lwt_main.run (Migration.up migrate_url) in
+          (match up_tampered with
+           | Ok _ -> check "migration up (tampered 0001): refused" false
+           | Error e ->
+             (check "migration up (tampered 0001): refused" true;
+              check "migration up (tampered 0001): mentions changed" (contains e "changed"))));
+      (* confirm the restore: a clean up now succeeds *)
+      let up_restored = Lwt_main.run (Migration.up migrate_url) in
+      (match up_restored with
+       | Ok _ -> check "migration up (restored 0001): ok" true
+       | Error e ->
+         (check "migration up (restored 0001): ok" false; Printf.eprintf "  up: %s\n%!" e; exit 1));
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
 
       (* scratch database *)

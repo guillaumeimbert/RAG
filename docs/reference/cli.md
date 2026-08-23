@@ -149,13 +149,19 @@ empty database. Refuses an inconsistent applied history.
 
 ### `migrate baseline`
 
-Record the current `schema/*.sql` files as applied **without re-running them**.
-This is the one-time transition for databases that already have the schema but
-no `schema_migrations` records (e.g. initialized by an older version of
-`compose.yaml`, which used to apply the schema files via
-`docker-entrypoint-initdb.d` without leaving records). `baseline` **verifies
-the schema is present** (the fingerprint columns `chunks.embedding`,
-`holdings.position_index`, and `ownership_events.event_index` must all exist)
-and refuses an empty or partially-initialized database — run `migrate up`
-instead on those. It also refuses if a file's recorded checksum no longer
-matches. After `baseline`, `migrate up` applies only files added later.
+Record the `schema/*.sql` files up to and including the supported legacy
+schema version (currently version 6, the version the fingerprint corresponds
+to) as applied **without re-running them**. This is the one-time transition
+for databases that already have that schema but no `schema_migrations`
+records (e.g. initialized by an older version of `compose.yaml`, which used to
+apply the schema files via `docker-entrypoint-initdb.d` without leaving
+records). `baseline` **verifies the schema is present** (a clearly-scoped
+fingerprint: the public tables `chunks`/`holdings`/`ownership_events`, the key
+columns `chunks.embedding`, `holdings.position_index`, and
+`ownership_events.event_index`, the `chunks_text_nonempty` constraint, and the
+`chunks_embedding_hnsw` index) and refuses an empty or partially-initialized
+database — run `migrate up` instead on those. It also refuses a file whose
+recorded checksum no longer matches, and any migration file beyond the
+supported legacy version (extend `verify_schema` and bump `baseline_version`
+when a new migration is added). After `baseline`, `migrate up` applies only
+files added later.

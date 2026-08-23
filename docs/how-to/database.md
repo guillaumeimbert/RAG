@@ -49,13 +49,17 @@ dune exec bin/migrate.exe -- up
 ```
 
 **Existing database (created before the tracker).** A database that already has
-the schema but no `schema_migrations` records (e.g. initialized by an older
+the baseline schema (currently version 6, the version the fingerprint
+corresponds to) but no `schema_migrations` records (e.g. initialized by an older
 version of `compose.yaml`, which used to apply the schema files via
 `docker-entrypoint-initdb.d` without leaving records) needs a one-time
-`baseline`. It verifies the schema is present (the fingerprint columns must all
-exist) and records the current files as applied without re-running them; it
-refuses an empty or partially-initialized database. After that, `migrate up`
-applies only files added later:
+`baseline`. It verifies the schema is present (a clearly-scoped fingerprint of
+the public tables, key columns, the `chunks_text_nonempty` constraint, and the
+`chunks_embedding_hnsw` index) and records the files up to and including the
+baseline version as applied without re-running them; it refuses an empty or
+partially-initialized database, and any migration file beyond the baseline
+version (extend the fingerprint and bump `baseline_version` when a new migration
+is added). After that, `migrate up` applies only files added later:
 
 ```sh
 dune exec bin/migrate.exe -- baseline   # one-time transition (verifies the schema)
@@ -69,7 +73,11 @@ the latest schema by `migrate up` (see **Reset the database**).
 **Adding a migration.** Add a new `schema/NNNN_name.sql` file (the next
 number). Never edit an applied file — its checksum is recorded in
 `schema_migrations` and `migrate up` refuses to continue if a recorded file has
-changed (add a new file instead). Then run `migrate up` on each deployment:
+changed (add a new file instead). Because `migrate baseline` is tied to a fixed
+`baseline_version` and a `verify_schema` fingerprint of that schema, also bump
+`baseline_version` and extend the fingerprint in `lib/migration.ml` when a new
+migration is added (so `baseline` can certify the new schema). Then run
+`migrate up` on each deployment:
 
 ```sh
 dune exec bin/migrate.exe -- up
@@ -116,10 +124,19 @@ dune exec bin/migrate.exe -- up
 
 Or nuke everything including the volume (destructive). The compose service
 no longer runs the migrations, so a fresh volume is empty; `migrate up` is the
-sole schema authority (it applies the files and records them):
+sole schema authority (it applies the files and records them). `up -d` does
+not wait for the healthcheck, so wait for Postgres to accept connections
+before running the migration:
 
 ```sh
-podman compose down -v && podman compose up -d && dune exec bin/migrate.exe -- up
+podman compose down -v
+podman compose up -d
+# wait for Postgres to accept connections (bounded to ~30 s)
+for i in $(seq 30); do
+  podman compose exec -T db pg_isready -U raguesslighter >/dev/null 2>&1 && break
+  sleep 1
+done
+dune exec bin/migrate.exe -- up
 ```
 
 (For a database initialized before the migration tracker existed — the older
