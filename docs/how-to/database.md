@@ -62,6 +62,14 @@ dune exec bin/migrate.exe -- up         # converges the schema + records the mig
 dune exec bin/migrate.exe -- status     # verify: all applied, none pending
 ```
 
+On a database that already has most of the schema this is cheap (the
+corrective migrations are no-ops on the objects they created), but a couple
+of them scan the data: `0003_chunk_quality` re-adds `chunks_text_nonempty`
+after `DELETE`ing whitespace-only rows, so on a very large `chunks` table the
+replay runs a full scan of `chunks.text` and takes row locks for the length of
+the transaction. That is safe and transactional, but schedule the first
+`migrate up` on a legacy production database for a short maintenance window.
+
 The current `compose.yaml` has no `docker-entrypoint-initdb.d` mount: `migrate up`
 is the sole schema authority, so a fresh volume is created empty and brought to
 the latest schema by `migrate up` (see **Reset the database**).

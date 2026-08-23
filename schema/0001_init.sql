@@ -1,4 +1,4 @@
--- 0001_init.sql — initial schema (runs automatically on first DB init)
+-- 0001_init.sql — initial schema (applied by `dune exec bin/migrate.exe -- up`)
 --
 -- One row per text chunk of one SEC filing. Embeddings come from an
 -- OpenAI-compatible server (vLLM / ninfer / llama.cpp / cloud); the column

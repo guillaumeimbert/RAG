@@ -520,6 +520,50 @@ let () =
        | Error e ->
          (check "migration up (stale checksum): refused" true;
           check "migration up (stale checksum): mentions changed" (contains e "changed")));
+      (* (i) replay converges an old 0003 constraint (the pre-correction btrim
+         check) and drops the whitespace-only rows that check admitted. *)
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      (* 0001 only (records version 1); simulate the pre-0003 old btrim
+         constraint and the tab-only chunk it admitted. *)
+      let _ = Lwt_main.run (Migration.snapshot_up_to migrate_url 2) in
+      pg_exec migrate_db
+        "ALTER TABLE chunks ADD CONSTRAINT chunks_text_nonempty CHECK (btrim(text) <> '');";
+      pg_exec migrate_db
+        "INSERT INTO chunks (doc_id, company, cik, form, filed_at, chunk_index, text, embedding)
+         VALUES ('legacy-doc', 'Legacy', '0001', '10-K', '2024-01-01', 0, CHR(9),
+                 ('[' || (SELECT array_to_string(array(select 0 from generate_series(1,2560)), ', ')) || ']')::vector(2560));";
+      let up3 = Lwt_main.run (Migration.up migrate_url) in
+      check "migration up (old 0003): applied"
+        (match up3 with Ok _ -> true | _ -> false);
+      check "migration up (old 0003): whitespace row dropped"
+        ((match pg_query migrate_db
+             "SELECT count(*)::int FROM chunks WHERE NOT (text ~ '[^[:space:]]')"
+         with [ [ n ] ] -> n = "0" | _ -> false));
+      check "migration up (old 0003): regex constraint installed"
+        ((match pg_query migrate_db
+             "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'chunks_text_nonempty'"
+         with [ [ d ] ] -> contains d "[^[:space:]]" | _ -> false));
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      (* (j) replay converges an old non-halfvec chunks_embedding_hnsw index by
+         replacing it with the halfvec expression index. (The realistic 2560-dim
+         old state was a generated embedding_hv column, which this environment
+         cannot create; a btree stand-in exercises the same drop-and-rebuild
+         branch.) *)
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      (* 0001-0003 only (records 1-3); replace the halfvec expression index with
+         a non-halfvec stand-in under the same name, then let up apply 0004. *)
+      let _ = Lwt_main.run (Migration.snapshot_up_to migrate_url 4) in
+      pg_exec migrate_db "DROP INDEX chunks_embedding_hnsw;";
+      pg_exec migrate_db "CREATE INDEX chunks_embedding_hnsw ON chunks (doc_id);";
+      let up4 = Lwt_main.run (Migration.up migrate_url) in
+      check "migration up (old 0004 index): applied"
+        (match up4 with Ok _ -> true | _ -> false);
+      check "migration up (old 0004 index): halfvec expression index restored"
+        ((match pg_query migrate_db
+             "SELECT indexdef FROM pg_indexes WHERE indexname = 'chunks_embedding_hnsw'"
+         with [ [ d ] ] -> contains d "halfvec" | _ -> false));
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
 
       (* scratch database *)
