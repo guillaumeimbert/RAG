@@ -1,40 +1,76 @@
-# RAGuesslighter - Retrieval-Augmented Guesslighter
+# RAGuesslighter — Retrieval-Augmented Guesslighter
 
 Retrieval-Augmented Guesslighter over **SEC EDGAR filings**, in OCaml.
 
-This is a pure vibe-coding proof of concept: built with Qwen 3.8 27B under
-almost no supervision, primarily to see how far the model can get on its
-own. Will it go further than expected?
+This is a pure vibe-coding proof of concept: built with Qwen 3.8 27B
+under almost no supervision, primarily to see how far the model can
+get on its own. Will it go further than expected?
 
-Filings are ingested through the official public EDGAR APIs (no key, fair
-access policy), chunked and embedded through any **OpenAI-compatible**
-inference server (vLLM, ninfer, llama.cpp, or the cloud), stored in
-**PostgreSQL/pgvector**, and searchable with grounded LLM answers.
+Filings are ingested through the official public EDGAR APIs (no key,
+fair access policy), then take **two paths**: narrative filings
+(10-K/10-Q/8-K/…) become embedded chunks for vector search and
+grounded LLM answers; ownership filings (13G/13D/13F-HR) are parsed
+from their raw SEC XML into relational tables and answered with
+exact SQL — with `ask` blending both when the question is
+ownership-shaped. Everything is stored in **PostgreSQL/pgvector** and
+inference runs against any **OpenAI-compatible** server (vLLM,
+ninfer, llama.cpp, or the cloud).
 
 ```
  ingest                                                                  query
  ──────                                                                  ─────
  EDGAR daily-index sitemaps / per-CIK submissions JSON
-        │  (accession numbers, gzip XML/JSON)
+        │
         ▼
  Archives: filing index page → primary document
         │
         ├── narrative forms (10-K, 10-Q, 8-K, …): primary document (.htm)
-        │        (HTML, 1–20 MB)
         │        ▼
-        │   html_text: heading-aware blocks → chunk: size/overlap cuts
-        │        │  (text blocks)
-        │        ▼
-        │   OpenAI-compatible /embeddings ──► pgvector (cosine, HNSW)
+        │   html_text → chunk → OpenAI-compatible /embeddings ──► pgvector
         │
         ├── ownership forms (13G, 13D): primary_doc.xml  ──► ownership_events
         ├── (13F-HR): primary_doc.xml + information_table.xml ► holdings
         │        (exact fields → SQL; 13G/13D narrative also chunked)
-        │                                        │
-        ▼                                        ▼
-        /ask TEXT ◄── OpenAI /chat (grounded prompt, prose hits +
-        [SQL] ownership evidence when the question is ownership-shaped)
-        /search TEXT ◄── vector search          /holders --subject X ◄── SQL
+        ▼
+ /search TEXT ◄── vector search
+ /ask TEXT      ◄── OpenAI /chat (prose hits + [SQL] ownership evidence)
+ /holders       ◄── pure SQL over ownership_events / holdings
+```
+
+## Documentation
+
+The docs follow the [Diátaxis](https://diataxis.fr) framework —
+[**start here**](docs/index.md):
+
+| You want to… | Read |
+|---|---|
+| learn, by doing | [Tutorial: your first ingest and first question](docs/tutorials/first-ingest.md) |
+| get something done | [How-to guides](docs/index.md) |
+| look up the exact flag / setting / column | [Reference](docs/index.md) |
+| understand the design | [Explanation](docs/index.md) |
+
+## Quickstart
+
+```sh
+# 1. prerequisites: OCaml 5.5.0 (opam switch `raguesslighter`), podman,
+#    a running OpenAI-compatible server for chat + embeddings
+
+# 2. database (Postgres 17 + pgvector; schema runs on first init)
+podman compose up -d
+
+# 3. configuration
+cp .env.example .env       # then edit: SEC_USER_AGENT, OPENAI_BASE_URL, models
+
+# 4. build
+dune build
+
+# 5. ingest one company (narrative + ownership filings)
+dune exec bin/ingest.exe -- ticker NVDA
+
+# 6. ask it something
+dune exec bin/query.exe -- ask "What risks does NVDA disclose about China export controls?"
+dune exec bin/query.exe -- ask "What percentage of Nebius does NVIDIA own?"
+dune exec bin/query.exe -- holders --subject NBIS
 ```
 
 ## Requirements
@@ -42,145 +78,29 @@ inference server (vLLM, ninfer, llama.cpp, or the cloud), stored in
 - **OCaml 5.5.0** + dune ≥ 3.20 (opam switch `raguesslighter`,
   `opam switch .` to install from `raguesslighter.opam`).
 - **PostgreSQL 17 + pgvector** — a ready podman stack is provided
-  (see below).
+  (`compose.yaml`).
 - **Any OpenAI-compatible server** for chat + embeddings
   (`OPENAI_BASE_URL`); the app only speaks HTTP to it.
-
-## Setup
-
-```sh
-# 1. database (Postgres 17 + pgvector; schema runs on first init;
-#    on an existing database apply the new schema files manually with psql)
-podman compose up -d
-
-# 2. configuration
-cp .env.example .env       # then edit: OPENAI_BASE_URL, models, SEC_USER_AGENT
-
-# 3. build
-dune build
-```
-
-`.env` is gitignored; every behaviour knob lives there (see
-`.env.example` for the full annotated list).
-
-## Usage
-
-### Ingest
-
-```sh
-dune exec bin/ingest.exe -- day 2026-08-20        # one business day
-dune exec bin/ingest.exe -- backfill 2026-08-01 2026-08-20   # a range (weekends/holidays skipped)
-dune exec bin/ingest.exe -- cik 1045810           # one company's recent filings
-dune exec bin/ingest.exe -- ticker NVDA           # same, via company_tickers.json
-dune exec bin/ingest.exe -- stats                 # store contents
-```
-
-Discovery is per-business-day via the **daily-index sitemaps** (the
-complete filing set for a day, ~5,000 accessions), *not* the
-browse-edgar "current filings" page (a sample of the current day only) —
-see [docs/adr/ADR-001-ingest-discovery.md](docs/adr/ADR-001-ingest-discovery.md).
-Ingesting is **idempotent**: `(doc_id, chunk_index)` is unique and
-already-ingested documents are skipped.
-
-Only the forms in `FORMS` are ingested (default: 10-K/A, 10-Q/A, 8-K/A,
-20-F/A, 6-K **plus the ownership schedules 13G, 13D, 13F-HR**);
-`FORMS=ALL` includes registration statements and proxy filings
-(~5,000/day vs a few hundred).
-
-**Ownership filings take a structured path** (ADR-002): 13G/13D/13F-HR
-are parsed from their raw SEC XML into the `ownership_events` /
-`holdings` tables (exact filer/issuer/shares/percent/period fields) and
-queried with SQL — while their narrative (13G/13D items & comments) is
-also chunked and embedded like any other filing. See
-[docs/adr/ADR-002-heterogeneous-retrieval.md](docs/adr/ADR-002-heterogeneous-retrieval.md).
-
-### Query
-
-```sh
-dune exec bin/query.exe -- search "goodwill impairment" --form 10-K -k 8
-dune exec bin/query.exe -- ask "What risks does NVDA disclose about China export controls?"
-dune exec bin/query.exe -- ask "What percentage of Nebius does NVIDIA own?"
-dune exec bin/query.exe -- holders --subject NVDA
-dune exec bin/query.exe -- holders --subject NBIS
-```
-
-`search` prints the top hits with metadata (company, form, filed date,
-section, similarity); `ask` feeds the hits to the LLM with a grounded
-prompt and prints the answer with citations. Both accept `--cik`,
-`--form` and `--ticker` filters.
-
-When a question is **ownership-shaped** (mentions holders, ownership,
-stake, institutional, 13F/13D/13G, percent…), `ask` additionally
-resolves the companies named in the question and attaches the exact
-structured rows (`ownership_events` + `holdings`) to the prompt as a
-`[SQL]` evidence block — so percentage/share questions are answered
-from the numbers, not from fuzzy prose.
-
-`holders --subject <ticker|CIK>` is the pure-SQL path: latest 13G/13D
-event per filer for the subject (with the change vs the previous event)
-plus the latest 13F report per institutional filer.
-
-### Ad-hoc SQL
-
-No `psql` client is needed on the host: run one in a throwaway container
-on the host network (it reaches the same `localhost:5432` the app uses):
-
-```sh
-podman run --rm --network host pgvector/pgvector:pg17 psql \
-  "postgresql://raguesslighter:raguesslighter@127.0.0.1:5432/raguesslighter" \
-  -c "SELECT company, form, count(*) FROM chunks GROUP BY 1, 2;"
-```
-
-(Adjust the credentials if your `compose.yaml` / `.env` differ.)
-
-## Testing
-
-```sh
-dune build
-dune runtest
-```
-
-- **Unit tests** (`test/test*.ml`, 202 cases): every library on its own,
-  with **fixtures that pin the real SEC and OpenAI wire formats**
-  (`test/fixtures/`): real EDGAR index pages (NVDA/AAPL 10-K), a real
-  8-K HTML filing, a real daily-index sitemap (gzip), a real submissions
-  JSON, `company_tickers.json`, real 13G/13D/13F XML filings (NVDA →
-  Nebius 13G, GameStop 13D, NVDA 13F cover + information table), and
-  OpenAI chat/embedding responses.
-- **End-to-end test** (`test/e2e.ml`): no network. Two mock HTTP servers
-  (EDGAR + OpenAI, `test/mock.ml`) are started in-process; the full
-  pipeline runs against them — ticker → CIK → submissions → filing index
-  → document → chunks → embeddings → store → **ownership XML →
-  `ownership_events`/`holdings` → SQL holders/positions queries** — plus
-  idempotency, search with metadata filters and stats. The e2e test
-  creates and destroys a scratch database `raguesslighter_e2e` (the main
-  one is left untouched), so Postgres must be reachable at
-  `DATABASE_URL`.
 
 ## Project layout
 
 ```
 bin/    ingest.exe, query.exe (cmdliner CLIs)
-lib/    config, net (HTTP client), gz, date, edgar (discovery + parsing),
-       html_text, chunk, openai, json, xml (minimal XML walker),
-       ownership (13G/13D/13F parsers), store (pgvector), pipeline
-schema/ 0001_init.sql — chunks table + HNSW index (runs on first DB init)
-        0002_ownership.sql — ownership_events + holdings tables
-test/   unit + e2e tests, fixture helpers, mock HTTP servers, fixtures/
-docs/adr/  ADR-001: ingest discovery via daily-index sitemaps
-           ADR-002: heterogeneous retrieval (prose RAG + structured SQL)
-vendor/ppx_rapper  vendored SQL-query ppx (rapper)
+lib/    config, net, gz, date, edgar (discovery + parsing), html_text,
+       chunk, openai, json, xml (minimal XML walker), ownership
+       (13G/13D/13F parsers), store (pgvector), pipeline
+schema/ 0001_init.sql (chunks + HNSW), 0002_ownership.sql
+test/   unit + e2e tests, mock HTTP servers, captured fixtures/
+docs/   Diátaxis docs: tutorials/, how-to/, reference/, explanation/, adr/
+vendor/ vendored SQL-query ppx (rapper)
 ```
 
 ## Notes
 
 - **SEC fair access**: static `SEC_USER_AGENT` with contact info,
-  ≤ 10 req/s. EDGAR has no API key.
-- **Embedding dimension**: `EMBEDDING_DIM` must match the `vector(N)`
-  column in `schema/0001_init.sql` (2560 = qwen3-embedding-4b, the
-  reference model of this stack; 768 = nomic-embed-text). The HNSW index
-  is created only when N ≤ 2000 (pgvector limit), otherwise retrieval
-  falls back to sequential scan.
+  ≤ 10 req/s, no API key.
+- **Embedding dimension**: `EMBEDDING_DIM` must match the
+  `vector(N)` column in `schema/0001_init.sql` (2560 =
+  qwen3-embedding-4b; HNSW only when N ≤ 2000).
 - **No in-process models**: inference is entirely behind
-  `OPENAI_BASE_URL`; swapping vLLM for the cloud changes one line in
-  `.env`.
+  `OPENAI_BASE_URL`; swapping servers changes one line in `.env`.
