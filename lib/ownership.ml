@@ -424,7 +424,15 @@ let parse_13d (xml : string) ~meta ~form : event list * string =
 
 (** One position of the 13F information table. [issuer_cik] is resolved
     by the pipeline against the company-tickers file (name match); it is
-    not present in the raw XML. *)
+    not present in the raw XML.
+
+    A row's identity is its position in the information table (the
+    [position_index] assigned by the pipeline), NOT the (cusip, class,
+    SH/PRN) tuple: a single 13F can legitimately list the same (cusip,
+    class, SH/PRN) more than once — separate lots, positions reported for
+    other managers ([other_manager]), and put/call splits ([put_call]) —
+    each with its own value and share count. [prnamt_type] is the SH/PRN
+    type (SH / PRN / UNIT), NOT the put/call flag. *)
 type position = {
   issuer_name : string;
   issuer_cusip : string;
@@ -432,7 +440,12 @@ type position = {
   value_usd : int option;
   shares : int option;
   prnamt_type : string;
-  (** SH / PRN / UNIT *)
+  (** SH / PRN / UNIT — the share-or-principal type (not put/call) *)
+  put_call : string;
+  (** SEC [putCall] (P / C); "" when the element is absent *)
+  other_manager : string;
+  (** SEC [otherManager] ("YES" when the position is reported on behalf of
+      another manager); "" when absent *)
   discretion : string;
   vote_sole : int option;
   vote_shared : int option;
@@ -445,8 +458,43 @@ type t13f = {
   period : Date.t;
   is_amendment : bool;
   total_value_usd : int option;
+  (** cover [tableValueTotal] — the information table's stated total value *)
+  table_entry_total : int option;
+  (** cover [tableEntryTotal] — the information table's stated row count *)
   positions : position list;
 }
+
+(** Check a parsed information table against the cover's summary totals.
+    Returns [None] when consistent, or [Some msg] describing the mismatch.
+
+    A 13F cover states [tableEntryTotal] (the row count) and
+    [tableValueTotal] (the value sum) for its information table. A table
+    that was truncated mid-download, or that does not match the cover's
+    own totals, is schema-invalid: ingesting it would store a partial
+    position list. The check is [None]-tolerant — a cover with a missing
+    total (rare) is not validated. [List.sum] over the parsed values uses 0
+    for an absent value, which matches the SEC's own summing (every real
+    row carries a value). *)
+let validate_positions (total_value : int option) (entry_total : int option) (positions : position list) :
+    string option =
+  let count = List.length positions in
+  let count_msg =
+    match entry_total with
+    | Some n when n <> count ->
+      Some (Printf.sprintf "parsed %d positions but the cover reports tableEntryTotal=%d" count n)
+    | _ -> None
+  in
+  let sum = List.fold_left (fun acc p -> acc + Option.value ~default:0 p.value_usd) 0 positions in
+  let value_msg =
+    match total_value with
+    | Some total when total <> sum ->
+      Some (Printf.sprintf "parsed positions sum to %d but the cover reports tableValueTotal=%d" sum total)
+    | _ -> None
+  in
+  (match (count_msg, value_msg) with
+   | Some m, _ -> Some m
+   | None, Some m -> Some m
+   | None, None -> None)
 
 (** [parse_13f cover_xml ~meta ~form table]: cover XML plus the raw
     information-table XML ([None] yields zero positions). *)
@@ -487,6 +535,11 @@ let parse_13f (cover_xml : string) ~meta ~form (table : string option) : t13f =
     |> Option.value ~default:""
     |> int_of_text
   in
+  let entry_total =
+    Xml.path_text [ "formData"; "summaryPage"; "tableEntryTotal" ] root
+    |> Option.value ~default:""
+    |> int_of_text
+  in
   let positions =
     match table with
     | None -> []
@@ -518,6 +571,8 @@ let parse_13f (cover_xml : string) ~meta ~form (table : string option) : t13f =
              ; prnamt_type =
                  Xml.path_text [ "shrsOrPrnAmt"; "sshPrnamtType" ] row
                  |> Option.value ~default:""
+             ; put_call = Xml.child_text "putCall" row |> Option.value ~default:""
+             ; other_manager = Xml.child_text "otherManager" row |> Option.value ~default:""
              ; discretion =
                  Xml.child_text "investmentDiscretion" row |> Option.value ~default:""
              ; vote_sole =
@@ -533,4 +588,5 @@ let parse_13f (cover_xml : string) ~meta ~form (table : string option) : t13f =
   ; period
   ; is_amendment = is_am
   ; total_value_usd = total
+  ; table_entry_total = entry_total
   ; positions }

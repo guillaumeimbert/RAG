@@ -115,8 +115,9 @@ let apply_result (stats : stats ref) (res : job_result) : unit =
           positions = !stats.positions + r.positions }
 
 (** [Ownership.event] -> upsertable row (dates as ISO strings). *)
-let event_row (e : Ownership.event) : Store.own_event_row =
+let event_row (event_index : int) (e : Ownership.event) : Store.own_event_row =
   { Store.accession = e.accession
+  ; event_index
   ; form = e.form
   ; event_date = Date.to_string e.event_date
   ; filed_at = Date.to_string e.filed_at
@@ -191,7 +192,7 @@ let ingest_13gd ?force (store : Store.t) (job : job) : job_result Lwt.t =
          | Ownership.Form13d -> Ownership.parse_13d xml ~meta ~form:index.form
          | _ -> Ownership.parse_13g xml ~meta ~form:index.form)
       in
-      let ev_rows = List.map event_row events in
+      let ev_rows = List.mapi (fun i e -> event_row i e) events in
       let embedded : (Chunk.block * float list) list Lwt.t =
         if prose = ""
         then Lwt.return []
@@ -254,6 +255,17 @@ let ingest_13f ?force (store : Store.t) (job : job) : job_result Lwt.t =
                (Printf.sprintf
                   "13F %s: information table downloaded but parsed to zero positions (truncated, schema-invalid, or empty)"
                   index.accession));
+        (* Validate the parsed information table against the cover's summary
+           totals ([tableEntryTotal] / [tableValueTotal]). A mismatch
+           indicates a truncated or schema-invalid table; fail loudly so the
+           filing is retried once the upstream is fixed. A missing total
+           (None) is not validated. *)
+        (match
+           Ownership.validate_positions t13f.total_value_usd
+             t13f.table_entry_total t13f.positions
+         with
+         | Some msg -> failwith (Printf.sprintf "13F %s: %s" index.accession msg)
+         | None -> ());
         let resolve (name : string) : string Lwt.t =
           if name = ""
           then Lwt.return ""
@@ -267,25 +279,29 @@ let ingest_13f ?force (store : Store.t) (job : job) : job_result Lwt.t =
         Lwt_list.map_s resolve (List.map (fun (p : Ownership.position) -> p.issuer_name) t13f.positions)
         >>= fun ciks ->
         let rows =
-          List.map2
-            (fun (p : Ownership.position) (cik : string) ->
-              { Store.accession = index.accession
-              ; filer_cik = t13f.filer_cik
-              ; filer_name = t13f.filer_name
-              ; period = Date.to_string t13f.period
-              ; filed_at = Date.to_string index.filed_at
-              ; issuer_name = p.issuer_name
-              ; issuer_cusip = p.issuer_cusip
-              ; issuer_cik = cik
-              ; class_name = p.class_name
-              ; value_usd = p.value_usd
-              ; shares = p.shares
-              ; prnamt_type = p.prnamt_type
-              ; discretion = p.discretion
-              ; vote_sole = p.vote_sole
-              ; vote_shared = p.vote_shared
-              ; vote_none = p.vote_none })
-            t13f.positions ciks
+          List.combine t13f.positions ciks
+          |> List.mapi
+               (fun i (p, cik) ->
+                 let (p : Ownership.position) = p in
+                 { Store.accession = index.accession
+                 ; position_index = i
+                 ; filer_cik = t13f.filer_cik
+                 ; filer_name = t13f.filer_name
+                 ; period = Date.to_string t13f.period
+                 ; filed_at = Date.to_string index.filed_at
+                 ; issuer_name = p.issuer_name
+                 ; issuer_cusip = p.issuer_cusip
+                 ; issuer_cik = cik
+                 ; class_name = p.class_name
+                 ; value_usd = p.value_usd
+                 ; shares = p.shares
+                 ; prnamt_type = p.prnamt_type
+                 ; put_call = p.put_call
+                 ; other_manager = p.other_manager
+                 ; discretion = p.discretion
+                 ; vote_sole = p.vote_sole
+                 ; vote_shared = p.vote_shared
+                 ; vote_none = p.vote_none })
         in
         Lwt.bind (Store.upsert_holdings ?force store index.accession rows) (fun () ->
           Lwt.return (Ingested { chunks = 0; events = 0; positions = List.length rows })))))

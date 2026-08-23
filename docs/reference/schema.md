@@ -62,14 +62,17 @@ a sequential scan over the same 10,000 synthetic vectors takes ~20 ms
 
 ## `ownership_events` — 13G / 13D
 
-One row per (filer, subject, class) of a beneficial-ownership
-statement. Amendments add rows with the same key and a later event
-date.
+One row per event in a beneficial-ownership statement, keyed by the event's
+XML ordinal ([`accession`, `event_index`]). A single 13G/13D filing can
+legitimately report the same (filer, subject, class) more than once — the same
+stake under different vote types, or multiple class holdings sharing a class
+name — each as its own row. Amendments re-file under a new accession.
 
 | Column | Type | Notes |
 |---|---|---|
 | `event_id` | `BIGINT` identity, PK | |
 | `accession` | `TEXT NOT NULL` | Filing accession number |
+| `event_index` | `INT NOT NULL` | 0-based ordinal of the event in the filing (UNIQUE with `accession`) |
 | `form` | `TEXT NOT NULL` | Normalised: `13G`, `13G/A`, `13D`, `13D/A` |
 | `event_date` | `DATE NOT NULL` | Date the threshold event occurred |
 | `filed_at` | `DATE NOT NULL` | Filing date |
@@ -86,34 +89,43 @@ date.
 | `index_url` | `TEXT NULL` | EDGAR index page of the filing |
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |
 
-Constraints/indexes: `UNIQUE (accession, filer_cik, subject_cik,
-class)`; B-tree on `(subject_cik, event_date DESC)` and
+Constraints/indexes: `UNIQUE (accession, event_index)`; B-tree on
+`(subject_cik, event_date DESC)` and
 `(filer_cik, event_date DESC)`.
 
 ## `holdings` — 13F
 
-One row per position in a 13F information table. An amendment re-files
-the full table under a new accession.
+One row per position in a 13F information table, keyed by the row's XML
+ordinal ([`accession`, `position_index`]). A single 13F can legitimately
+list the same (cusip, class, SH/PRN) more than once — separate lots, positions
+reported for other managers, and put/call splits — each as its own row. An
+amendment re-files the full table under a new accession.
 
 | Column | Type | Notes |
 |---|---|---|
 | `accession` | `TEXT NOT NULL` | 13F filing accession number (part of PK) |
+| `position_index` | `INT NOT NULL` | 0-based ordinal of the row in the information table (part of PK) |
 | `filer_cik` | `TEXT NOT NULL` | The filer (fund), 10-digit padded |
 | `filer_name` | `TEXT NULL` | |
 | `period` | `DATE NOT NULL` | `periodOfReport` (quarter end) |
 | `filed_at` | `DATE NOT NULL` | |
 | `issuer_name` | `TEXT NOT NULL` | As stated in the 13F |
-| `issuer_cusip` | `TEXT NOT NULL DEFAULT ''` | Part of PK |
+| `issuer_cusip` | `TEXT NOT NULL DEFAULT ''` | |
 | `issuer_cik` | `TEXT NOT NULL DEFAULT ''` | Resolved by name against the tickers file at ingest; `''` when unresolved |
-| `class` | `TEXT NOT NULL DEFAULT ''` | Part of PK |
+| `class` | `TEXT NOT NULL DEFAULT ''` | |
 | `value_usd` | `BIGINT NULL` | Position value in USD |
 | `shares` | `NUMERIC NULL` | |
-| `prnamt_type` | `TEXT NOT NULL DEFAULT ''` | `SH` / `PRN` / `UNIT`; part of PK |
+| `prnamt_type` | `TEXT NOT NULL DEFAULT ''` | `SH` / `PRN` / `UNIT` (the share-or-principal type, not put/call) |
+| `put_call` | `TEXT NOT NULL DEFAULT ''` | SEC `putCall` (`P` / `C`); `''` when absent |
+| `other_manager` | `TEXT NOT NULL DEFAULT ''` | SEC `otherManager` (`YES` when reported for another manager); `''` when absent |
 | `discretion` | `TEXT NULL` | Investment discretion (`SOLE`, `SHARED`, …) |
 | `vote_sole` / `vote_shared` / `vote_none` | `NUMERIC NULL` | Voting authority shares |
 
-Indexes: B-tree on `(issuer_cik, period DESC)` and
-`(filer_cik, period DESC)`.
+Primary key: `(accession, position_index)`. Indexes: B-tree on
+`(issuer_cik, period DESC)` and `(filer_cik, period DESC)`. The retrieval
+query (`Store.positions_of`) aggregates the rows of each (filer, report) —
+summing value and shares across lots — before picking the latest report per
+filer.
 
 ## Query conventions
 

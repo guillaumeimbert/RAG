@@ -220,6 +220,11 @@ let stats_q =
     [None] options are encoded as "" and stored as NULL (NULLIF). *)
 type own_event_row = {
   accession : string;
+  (** 0-based ordinal of this event in the 13G/13D filing. Part of the UNIQUE
+      constraint ([accession, event_index]) — the true identity of an event,
+      since a single 13G/13D filing can legitimately report the same
+      (filer, subject, class) more than once. *)
+  event_index : int;
   form : string;
   event_date : string;
   (** YYYY-MM-DD *)
@@ -240,6 +245,11 @@ type own_event_row = {
 (** One row of the holdings table prepared for a bulk upsert. *)
 type holding_row = {
   accession : string;
+  (** 0-based ordinal of this row in the 13F information table. Part of the
+      primary key ([accession, position_index]) — the true identity of a row,
+      since a single 13F can legitimately list the same (cusip, class, SH/PRN)
+      more than once (separate lots, other managers, put/call splits). *)
+  position_index : int;
   filer_cik : string;
   filer_name : string;
   period : string;
@@ -252,6 +262,8 @@ type holding_row = {
   value_usd : int option;
   shares : int option;
   prnamt_type : string;
+  put_call : string;
+  other_manager : string;
   discretion : string;
   vote_sole : int option;
   vote_shared : int option;
@@ -262,21 +274,22 @@ let own_events_json (rows : own_event_row list) : string =
   let row_json (r : own_event_row) =
     `List
       [
-        `String r.accession;
-        `String r.form;
-        `String r.event_date;
-        `String r.filed_at;
-        `String r.filer_cik;
-        `String r.filer_name;
-        `String r.subject_cik;
-        `String r.subject_name;
-        `String r.subject_cusip;
-        `String r.class_name;
-        `String (Option.map string_of_int r.shares |> Option.value ~default:"");
-        `String (Option.map string_of_float r.percent |> Option.value ~default:"");
-        `String (Bool.to_string r.passive);
-        `String (Bool.to_string r.is_amendment);
-        `String r.index_url;
+        `String r.accession; (* 0 *)
+        `String (string_of_int r.event_index); (* 1 *)
+        `String r.form; (* 2 *)
+        `String r.event_date; (* 3 *)
+        `String r.filed_at; (* 4 *)
+        `String r.filer_cik; (* 5 *)
+        `String r.filer_name; (* 6 *)
+        `String r.subject_cik; (* 7 *)
+        `String r.subject_name; (* 8 *)
+        `String r.subject_cusip; (* 9 *)
+        `String r.class_name; (* 10 *)
+        `String (Option.map string_of_int r.shares |> Option.value ~default:""); (* 11 *)
+        `String (Option.map string_of_float r.percent |> Option.value ~default:""); (* 12 *)
+        `String (Bool.to_string r.passive); (* 13 *)
+        `String (Bool.to_string r.is_amendment); (* 14 *)
+        `String r.index_url; (* 15 *)
       ]
   in
   Yojson.Safe.to_string (`List (List.map row_json rows))
@@ -286,22 +299,26 @@ let upsert_own_events_q =
     execute
     {sql|
       INSERT INTO ownership_events (
-        accession, form, event_date, filed_at, filer_cik, filer_name,
+        accession, event_index, form, event_date, filed_at, filer_cik, filer_name,
         subject_cik, subject_name, subject_cusip, class,
         shares, percent, passive, is_amendment, index_url
       )
       SELECT
-        jrow->>0, jrow->>1, (jrow->>2)::date, (jrow->>3)::date,
-        jrow->>4, jrow->>5, jrow->>6, jrow->>7, jrow->>8, jrow->>9,
-        NULLIF(jrow->>10, '')::numeric, NULLIF(jrow->>11, '')::numeric,
-        (jrow->>12)::bool, (jrow->>13)::bool, jrow->>14
+        jrow->>0, (jrow->>1)::int, jrow->>2, (jrow->>3)::date, (jrow->>4)::date,
+        jrow->>5, jrow->>6, jrow->>7, jrow->>8, jrow->>9, jrow->>10,
+        NULLIF(jrow->>11, '')::numeric, NULLIF(jrow->>12, '')::numeric,
+        (jrow->>13)::bool, (jrow->>14)::bool, jrow->>15
       FROM jsonb_array_elements(%string{rows}::jsonb) AS jrow
-      ON CONFLICT (accession, filer_cik, subject_cik, class) DO UPDATE SET
+      ON CONFLICT (accession, event_index) DO UPDATE SET
+        form         = EXCLUDED.form,
         event_date   = EXCLUDED.event_date,
         filed_at     = EXCLUDED.filed_at,
+        filer_cik    = EXCLUDED.filer_cik,
         filer_name   = EXCLUDED.filer_name,
+        subject_cik  = EXCLUDED.subject_cik,
         subject_name = EXCLUDED.subject_name,
         subject_cusip = EXCLUDED.subject_cusip,
+        class        = EXCLUDED.class,
         shares       = EXCLUDED.shares,
         percent      = EXCLUDED.percent,
         passive      = EXCLUDED.passive,
@@ -314,22 +331,25 @@ let holdings_json (rows : holding_row list) : string =
   let row_json (r : holding_row) =
     `List
       [
-        `String r.accession;
-        `String r.filer_cik;
-        `String r.filer_name;
-        `String r.period;
-        `String r.filed_at;
-        `String r.issuer_name;
-        `String r.issuer_cusip;
-        `String r.issuer_cik;
-        `String r.class_name;
-        `String (Option.map string_of_int r.value_usd |> Option.value ~default:"");
-        `String (Option.map string_of_int r.shares |> Option.value ~default:"");
-        `String r.prnamt_type;
-        `String r.discretion;
-        `String (Option.map string_of_int r.vote_sole |> Option.value ~default:"");
-        `String (Option.map string_of_int r.vote_shared |> Option.value ~default:"");
-        `String (Option.map string_of_int r.vote_none |> Option.value ~default:"");
+        `String r.accession; (* 0 *)
+        `String (string_of_int r.position_index); (* 1 *)
+        `String r.filer_cik; (* 2 *)
+        `String r.filer_name; (* 3 *)
+        `String r.period; (* 4 *)
+        `String r.filed_at; (* 5 *)
+        `String r.issuer_name; (* 6 *)
+        `String r.issuer_cusip; (* 7 *)
+        `String r.issuer_cik; (* 8 *)
+        `String r.class_name; (* 9 *)
+        `String (Option.map string_of_int r.value_usd |> Option.value ~default:""); (* 10 *)
+        `String (Option.map string_of_int r.shares |> Option.value ~default:""); (* 11 *)
+        `String r.prnamt_type; (* 12 *)
+        `String r.put_call; (* 13 *)
+        `String r.other_manager; (* 14 *)
+        `String r.discretion; (* 15 *)
+        `String (Option.map string_of_int r.vote_sole |> Option.value ~default:""); (* 16 *)
+        `String (Option.map string_of_int r.vote_shared |> Option.value ~default:""); (* 17 *)
+        `String (Option.map string_of_int r.vote_none |> Option.value ~default:""); (* 18 *)
       ]
   in
   Yojson.Safe.to_string (`List (List.map row_json rows))
@@ -339,27 +359,33 @@ let upsert_holdings_q =
     execute
     {sql|
       INSERT INTO holdings (
-        accession, filer_cik, filer_name, period, filed_at,
+        accession, position_index, filer_cik, filer_name, period, filed_at,
         issuer_name, issuer_cusip, issuer_cik, class,
-        value_usd, shares, prnamt_type, discretion,
+        value_usd, shares, prnamt_type, put_call, other_manager, discretion,
         vote_sole, vote_shared, vote_none
       )
       SELECT
-        jrow->>0, jrow->>1, jrow->>2, (jrow->>3)::date, (jrow->>4)::date,
-        jrow->>5, jrow->>6, jrow->>7, jrow->>8,
-        NULLIF(jrow->>9, '')::bigint, NULLIF(jrow->>10, '')::numeric,
-        jrow->>11, jrow->>12,
-        NULLIF(jrow->>13, '')::numeric, NULLIF(jrow->>14, '')::numeric,
-        NULLIF(jrow->>15, '')::numeric
+        jrow->>0, (jrow->>1)::int, jrow->>2, jrow->>3, (jrow->>4)::date, (jrow->>5)::date,
+        jrow->>6, jrow->>7, jrow->>8, jrow->>9,
+        NULLIF(jrow->>10, '')::bigint, NULLIF(jrow->>11, '')::numeric,
+        jrow->>12, jrow->>13, jrow->>14, jrow->>15,
+        NULLIF(jrow->>16, '')::numeric, NULLIF(jrow->>17, '')::numeric,
+        NULLIF(jrow->>18, '')::numeric
       FROM jsonb_array_elements(%string{rows}::jsonb) AS jrow
-      ON CONFLICT (accession, issuer_cusip, class, prnamt_type) DO UPDATE SET
+      ON CONFLICT (accession, position_index) DO UPDATE SET
+        filer_cik   = EXCLUDED.filer_cik,
         filer_name  = EXCLUDED.filer_name,
         period      = EXCLUDED.period,
         filed_at    = EXCLUDED.filed_at,
         issuer_name = EXCLUDED.issuer_name,
+        issuer_cusip = EXCLUDED.issuer_cusip,
         issuer_cik  = EXCLUDED.issuer_cik,
+        class       = EXCLUDED.class,
         value_usd   = EXCLUDED.value_usd,
         shares      = EXCLUDED.shares,
+        prnamt_type = EXCLUDED.prnamt_type,
+        put_call    = EXCLUDED.put_call,
+        other_manager = EXCLUDED.other_manager,
         discretion  = EXCLUDED.discretion,
         vote_sole   = EXCLUDED.vote_sole,
         vote_shared = EXCLUDED.vote_shared,
@@ -468,9 +494,11 @@ let holders_q =
     |sql}
     record_out syntax_off]
 
-(** A 13F position in [issuer] from the latest report of each filer
-    (institutional holders of the issuer). Match by CIK when given, else
-    by name. *)
+(** The institutional holders of [issuer] from the latest report of each
+    filer. A single 13F report can hold the issuer in several lots (separate
+    rows), so the rows of each (filer, report) are aggregated — the value and
+    share counts are summed — before the latest report per filer is picked.
+    Match by CIK when given, else by name. *)
 type position = {
   filer_cik : string;
   filer_name : string;
@@ -487,16 +515,30 @@ let positions_q =
   [%rapper
     get_many
     {sql|
-      WITH latest AS (
+      WITH per_report AS (
         SELECT
-          filer_cik, filer_name, period, issuer_name, class AS class_name,
-          value_usd, shares, discretion, accession,
-          ROW_NUMBER() OVER (
-            PARTITION BY filer_cik ORDER BY period DESC, filed_at DESC
-          ) AS rn
+          filer_cik,
+          MAX(filer_name) AS filer_name,
+          period,
+          filed_at,
+          MAX(issuer_name) AS issuer_name,
+          MAX(class) AS class_name,
+          SUM(value_usd) AS value_usd,
+          SUM(shares) AS shares,
+          MAX(discretion) AS discretion,
+          MAX(accession) AS accession
         FROM holdings
         WHERE (%string{issuer_cik} <> '' AND issuer_cik = %string{issuer_cik})
            OR (%string{issuer_cik} = '' AND issuer_name ILIKE %string{issuer_name})
+        GROUP BY filer_cik, period, filed_at
+      ),
+      latest AS (
+        SELECT
+          per_report.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY filer_cik ORDER BY period DESC, filed_at DESC
+          ) AS rn
+        FROM per_report
       )
       SELECT
         l.filer_cik AS @string{filer_cik},
@@ -510,7 +552,7 @@ let positions_q =
         l.accession AS @string{accession}
       FROM latest l
       WHERE l.rn = 1
-      ORDER BY COALESCE(l.value_usd, -1) DESC NULLS LAST
+      ORDER BY l.value_usd DESC NULLS LAST
       LIMIT %int{limit}
     |sql}
     record_out syntax_off]
@@ -583,8 +625,12 @@ let create (cfg : Config.t) : t Lwt.t =
   (* Fail fast if pgvector is missing or older than the minimum: an older
      extension silently ignores the hnsw.iterative_scan GUC the filtered search
      relies on (Postgres accepts unknown custom GUCs), so the search would
-     return too few rows with no error. *)
+     return too few rows with no error. On failure, drain the pool we just
+     created so the validation connection is closed before we raise. *)
   Lwt.bind (connect cfg.Config.database_url) (fun pool ->
+    let fail_drained (msg : string) : t Lwt.t =
+      Lwt.bind (close_pool pool) (fun () -> Lwt.fail (Db msg))
+    in
     Lwt.bind
       ( Caqti_lwt_unix.Pool.use
           (fun conn ->
@@ -593,16 +639,12 @@ let create (cfg : Config.t) : t Lwt.t =
           pool )
       (function
         | Ok v ->
-          if version_at_least v min_pgvector
-          then Lwt.return { pool; cfg }
-          else
-            Lwt.fail
-              (Db
-                 ("pgvector " ^ v ^ " is too old: the filtered search needs "
-                  ^ min_pgvector ^ " or newer (hnsw.iterative_scan)"))
-        | Error e ->
-          Lwt.fail
-            (Db ("pgvector version check failed: " ^ Caqti_error.show e))))
+          (if version_at_least v min_pgvector
+           then Lwt.return { pool; cfg }
+           else fail_drained
+                  ("pgvector " ^ v ^ " is too old: the filtered search needs "
+                   ^ min_pgvector ^ " or newer (hnsw.iterative_scan)"))
+        | Error e -> fail_drained ("pgvector version check failed: " ^ Caqti_error.show e)))
 
 let close t : unit Lwt.t = close_pool t.pool
 
@@ -810,7 +852,10 @@ let upsert_13gd ?(force = false) t (doc_id : string) (events : own_event_row lis
         | Error _ as r -> Lwt.return r)
     else write ())
 
-(** Bulk upsert of holdings rows (13F positions). *)
+(** Bulk upsert of holdings rows (13F positions). Rows are keyed by
+    ([accession, position_index]) — the XML row ordinal — so a 13F that lists
+    the same (cusip, class, SH/PRN) more than once is stored in full (each
+    lot as its own row), with no de-duplication. *)
 let upsert_holdings_on (conn : Caqti_lwt.connection) (rows : holding_row list) :
     (unit, Caqti_error.t) result Lwt.t =
   let rec go = function

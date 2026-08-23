@@ -356,10 +356,14 @@ let () =
       let schema2 = Test_fixtures.read_text (Test_fixtures.schema_file "0002_ownership.sql") in
       let schema3 = Test_fixtures.read_text (Test_fixtures.schema_file "0003_chunk_quality.sql") in
       let schema4 = Test_fixtures.read_text (Test_fixtures.schema_file "0004_halfvec_hnsw.sql") in
+      let schema5 = Test_fixtures.read_text (Test_fixtures.schema_file "0005_position_index.sql") in
+      let schema6 = Test_fixtures.read_text (Test_fixtures.schema_file "0006_event_index.sql") in
       pg_exec scratch_db schema;
       pg_exec scratch_db schema2;
       pg_exec scratch_db schema3;
       pg_exec scratch_db schema4;
+      pg_exec scratch_db schema5;
+      pg_exec scratch_db schema6;
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;
 
       (* pgvector >= 0.8.0 is required: the filtered-search path relies on the
@@ -773,6 +777,7 @@ let () =
          set of 13G events directly and assert the SQL aggregation. *)
       let ev accession filer date pct sh amend =
         { Store.accession = accession
+        ; event_index = 0
         ; form = "13G"
         ; event_date = date
         ; filed_at = date
@@ -1043,6 +1048,7 @@ let () =
       let ev =
         {
           Store.accession = "atom-test";
+          event_index = 0;
           form = "13G";
           event_date = "2026-09-01";
           filed_at = "2026-09-01";
@@ -1139,6 +1145,7 @@ let () =
       let gevent () =
         {
           Store.accession = gdoc;
+          event_index = 0;
           form = "13G";
           event_date = "2026-09-01";
           filed_at = "2026-09-01";
@@ -1296,10 +1303,14 @@ let () =
           let schema2 = Test_fixtures.read_text (Test_fixtures.schema_file "0002_ownership.sql") in
           let schema3 = Test_fixtures.read_text (Test_fixtures.schema_file "0003_chunk_quality.sql") in
           let schema4 = Test_fixtures.read_text (Test_fixtures.schema_file "0004_halfvec_hnsw.sql") in
+          let schema5 = Test_fixtures.read_text (Test_fixtures.schema_file "0005_position_index.sql") in
+          let schema6 = Test_fixtures.read_text (Test_fixtures.schema_file "0006_event_index.sql") in
           pg_exec cli_db schema;
           pg_exec cli_db schema2;
           pg_exec cli_db schema3;
-          pg_exec cli_db schema4
+          pg_exec cli_db schema4;
+          pg_exec cli_db schema5;
+          pg_exec cli_db schema6
         in
         let env_file = Filename.temp_file "rag_e2e_env" ".env" in
         let () =
@@ -1454,6 +1465,8 @@ let () =
       pg_exec own_db schema;
       pg_exec own_db schema2;
       pg_exec own_db schema3;
+      pg_exec own_db schema5;
+      pg_exec own_db schema6;
       let ocfg =
         {
           cfg

@@ -26,6 +26,21 @@ let meta_13f =
     index_url = "https://example.com/13f-index.htm";
   }
 
+
+let pos ?(name = "A") ?(cusip = "C") ?(value = 0) () : Ownership.position =
+  { Ownership.issuer_name = name
+  ; issuer_cusip = cusip
+  ; class_name = "COM"
+  ; value_usd = Some value
+  ; shares = None
+  ; prnamt_type = "SH"
+  ; put_call = ""
+  ; other_manager = ""
+  ; discretion = ""
+  ; vote_sole = None
+  ; vote_shared = None
+  ; vote_none = None }
+
 let tests : (string * unit T.test_case list) list =
   [
     (
@@ -131,6 +146,7 @@ let tests : (string * unit T.test_case list) list =
             T.check T.bool "not an amendment" false f.is_amendment;
             T.check (T.option T.int) "total value" (Some 63439974569)
               f.total_value_usd;
+            T.check (T.option T.int) "table entry total" (Some 8) f.table_entry_total;
             T.check T.int "eight positions" 8 (List.length f.positions);
             ( match f.positions with
               | first :: _ ->
@@ -139,6 +155,8 @@ let tests : (string * unit T.test_case list) list =
                   first.value_usd;
                 T.check (T.option T.int) "first shares" (Some 7788161) first.shares;
                 T.check T.string "prnamt" "SH" first.prnamt_type;
+                T.check T.string "put_call default" "" first.put_call;
+                T.check T.string "other_manager default" "" first.other_manager;
                 T.check (T.option T.int) "vote sole" (Some 7788161) first.vote_sole
               | [] -> T.fail "no positions"));
         T.test_case "missing information table -> zero positions" `Quick (fun () ->
@@ -149,5 +167,25 @@ let tests : (string * unit T.test_case list) list =
             T.check T.int "no positions" 0 (List.length f.positions);
             T.check (T.option T.int) "total still parsed" (Some 63439974569)
               f.total_value_usd);
+      ] );
+    (
+      "validate_positions",
+      [
+        T.test_case "consistent: None" `Quick (fun () ->
+            let p = [pos ~name:"A" ~cusip:"C" ~value:100 () ; pos ~name:"B" ~cusip:"D" ~value:200 ()] in
+            T.check T.bool "None" true
+              (Option.is_none (Ownership.validate_positions (Some 300) (Some 2) p)));
+        T.test_case "entry count mismatch: Some" `Quick (fun () ->
+            let p = [pos ~value:100 ()] in
+            T.check T.bool "Some" true
+              (Option.is_some (Ownership.validate_positions (Some 100) (Some 2) p)));
+        T.test_case "value sum mismatch: Some" `Quick (fun () ->
+            let p = [pos ~value:100 ()] in
+            T.check T.bool "Some" true
+              (Option.is_some (Ownership.validate_positions (Some 999) (Some 1) p)));
+        T.test_case "missing totals: None (not validated)" `Quick (fun () ->
+            let p = [pos ~value:100 ()] in
+            T.check T.bool "None" true
+              (Option.is_none (Ownership.validate_positions None None p)));
       ] );
   ]

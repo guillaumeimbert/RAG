@@ -143,4 +143,6 @@ Note: the compose file uses the **floating** tag `pgvector/pgvector:pg17`
 (always the newest pgvector built for Postgres 17), so the version is not
 fixed by the image reference — the startup check is what keeps the
 requirement honest. Pin an explicit version tag (e.g.
-`pgvector/pgvector:pg17-0.8.0`) if you need reproducible builds.
+`pgvector/pgvector:0.8.0-pg17`) if you need reproducible builds. pgvector's
+tags are version-first (the pgvector version, then the Postgres major), so
+`0.8.0-pg17` is valid while `pg17-0.8.0` is not.
