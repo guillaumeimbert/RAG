@@ -43,18 +43,22 @@ For `master.20260820.idx` vs `sitemap.20260820.xml`:
 
 | Metric | Master | Sitemap |
 |---|---|---|
-| raw rows / `<loc>` entries | 4,183 | 4,983 |
+| raw rows / `<loc>` entries | 4,183 | 4,183 |
 | distinct accessions | **3,041** | **3,041** |
 | accessions only in one | 0 | 0 |
-| after `FORMS` allow-list (default) | **382** | 382 |
-| duplicate accession rows (same acc, several CIKs) | 1,142 | — |
+| duplicate accession rows (same acc, several CIKs) | 1,142 | 1,142 |
+| form type per filing | **yes** | no |
 
 - The master and the sitemap cover the **same** set of accessions for a
   business day (0 asymmetric). The master is therefore a complete discovery
   source, not a sample.
+- Because it carries the form type, the default `FORMS` allow-list shrinks
+  the 3,041 accessions to **382** *before* any index page is fetched. The
+  sitemap cannot do this: with no form type it must fetch all 3,041 index
+  pages to learn each filing's form.
 - The master lists the same accession once per related CIK (1,142 duplicate
-  rows on 2026-08-20); **deduping by accession** (first occurrence wins) is
-  required and loses nothing.
+  rows on 2026-08-20, as does the sitemap); **deduping by accession** (first
+  occurrence wins) is required and loses nothing.
 - CIKs in the master matched the CIK in the sitemap's file path for every row
   (0 mismatches), so the master's CIK column is a reliable basis for the
   index-page URL.
