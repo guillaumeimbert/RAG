@@ -49,6 +49,24 @@ let tests : (string * unit T.test_case list) list =
             T.match_raises "rejects 5000" inv_pred (fun () -> ignore (Store.candidate_of 5000)));
       ] );
     (
+      "validate_top_k",
+      [
+        T.test_case "accepts the full range 1..max without raising" `Quick (fun () ->
+            (* validate_top_k returns unit and raises only out of range, so a
+               sweep over the whole allowed range proves it never rejects a
+               valid value (the CLI calls this before any inference request). *)
+            List.iter (fun k -> Store.validate_top_k k) [1; 5; 10; 50; 51; 100; 999; 1000];
+            T.check T.bool "no raise" true true);
+        T.test_case "0 raises Invalid_argument" `Quick (fun () ->
+            T.match_raises "rejects 0" inv_pred (fun () -> Store.validate_top_k 0));
+        T.test_case "a negative value raises Invalid_argument" `Quick (fun () ->
+            T.match_raises "rejects -1" inv_pred (fun () -> Store.validate_top_k (-1)));
+        T.test_case "1001 (above the hnsw.ef_search cap) raises Invalid_argument" `Quick (fun () ->
+            T.match_raises "rejects 1001" inv_pred (fun () -> Store.validate_top_k 1001));
+        T.test_case "5000 raises Invalid_argument" `Quick (fun () ->
+            T.match_raises "rejects 5000" inv_pred (fun () -> Store.validate_top_k 5000));
+      ] );
+    (
       "version_at_least",
       [
         T.test_case "equal versions" `Quick (fun () ->

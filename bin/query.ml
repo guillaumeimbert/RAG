@@ -21,6 +21,7 @@ let run_query ~env_file (f : Config.t -> Store.t -> unit Lwt.t) : (unit, string)
    | Store.Db msg -> Error ("database: " ^ msg)
    | Openai.Api_error msg -> Error ("inference server: " ^ msg)
    | Net.Http_error e -> Error (Net.show_error e)
+   | Invalid_argument msg -> Error msg
    | e -> Error (Printexc.to_string e))
 
 let env_arg () =
@@ -213,8 +214,10 @@ let search_cmd =
     and+ e = env
     in
     run_query ~env_file:e (fun cfg store ->
+        let top_k = Option.value ~default:cfg.Config.top_k k in
+        Store.validate_top_k top_k;  (* reject an out-of-range --top-k before any inference request *)
         Lwt.bind (embed_query cfg text) (fun q ->
-          Lwt.bind (Store.search store ~query:q ~top_k:(Option.value ~default:cfg.Config.top_k k) ~cik:cik ~form:form ~ticker:ticker ~min_similarity:cfg.Config.min_similarity ()) (fun hits ->
+          Lwt.bind (Store.search store ~query:q ~top_k:top_k ~cik:cik ~form:form ~ticker:ticker ~min_similarity:cfg.Config.min_similarity ()) (fun hits ->
             if hits = []
             then Printf.printf "no results\n"
             else
@@ -259,8 +262,10 @@ let ask_cmd =
     and+ e = env
     in
     run_query ~env_file:e (fun cfg store ->
+        let top_k = Option.value ~default:cfg.Config.top_k k in
+        Store.validate_top_k top_k;  (* reject an out-of-range --top-k before any inference request *)
         Lwt.bind (embed_query cfg text) (fun q ->
-          Lwt.bind (Store.search store ~query:q ~top_k:(Option.value ~default:cfg.Config.top_k k) ~cik:cik ~form:form ~ticker:ticker ~min_similarity:cfg.Config.min_similarity ()) (fun hits ->
+          Lwt.bind (Store.search store ~query:q ~top_k:top_k ~cik:cik ~form:form ~ticker:ticker ~min_similarity:cfg.Config.min_similarity ()) (fun hits ->
             Lwt.bind (ownership_evidence cfg store text) (fun evidence ->
               if hits = [] && evidence = ""
               then (

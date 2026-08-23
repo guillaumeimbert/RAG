@@ -714,6 +714,20 @@ let upsert_chunks ?(force = false) t (doc_id : string) (rows : chunk_row list) :
         | Error _ as r -> Lwt.return r)
     else upsert_chunks_on conn rows)
 
+(** [validate_top_k n] — raise [Invalid_argument] unless [1 <= n <= max_top_k].
+    Shared by [candidate_of] and the CLI, so an out-of-range [n] (e.g. a
+    [--top-k] above pgvector's hnsw.ef_search cap of 1000, or [TOP_K=0]) is
+    rejected before any inference request is made. *)
+let validate_top_k (top_k : int) : unit =
+  if top_k < 1
+  then invalid_arg "Store.validate_top_k: top_k must be >= 1"
+  else if top_k > max_top_k
+  then
+    invalid_arg
+      ("Store.validate_top_k: top_k must be <= " ^ string_of_int max_top_k
+       ^ " (pgvector caps hnsw.ef_search at " ^ string_of_int max_top_k ^ ")")
+  else ()
+
 (** [candidate_of top_k] — the number of ANN candidates the inner query
     retrieves before the full-precision rerank. It is always AT LEAST [top_k]
     (so the outer [LIMIT top_k] can actually return [top_k] results — a cap
@@ -722,18 +736,12 @@ let upsert_chunks ?(force = false) t (doc_id : string) (rows : chunk_row list) :
     half-precision ordering displaced. For [top_k > 50] the candidate set is
     [top_k] itself (no extra buffer, but never fewer than requested). The
     candidate set feeds [hnsw.ef_search], which pgvector caps at 1000, so
-    [top_k > max_top_k] is rejected. Raises [Invalid_argument] for
-    [top_k < 1] or [top_k > max_top_k]. Pure and side-effect free so the
-    boundaries are unit-testable. *)
+    [top_k > max_top_k] is rejected by [validate_top_k]. Raises
+    [Invalid_argument] for [top_k < 1] or [top_k > max_top_k]. Pure and
+    side-effect free so the boundaries are unit-testable. *)
 let candidate_of (top_k : int) : int =
-  if top_k < 1
-  then invalid_arg "Store.candidate_of: top_k must be >= 1"
-  else if top_k > max_top_k
-  then
-    invalid_arg
-      ("Store.candidate_of: top_k must be <= " ^ string_of_int max_top_k
-       ^ " (pgvector caps hnsw.ef_search at " ^ string_of_int max_top_k ^ ")")
-  else max top_k (min 50 (top_k * 5))
+  validate_top_k top_k;
+  max top_k (min 50 (top_k * 5))
 
 (** Vector search with optional metadata filters (empty/None = no filter). *)
 let search t ~query ~top_k ?(cik : string option = None) ?(form : string option = None) ?(ticker : string option = None) ?(min_similarity : float = 0.0) () :

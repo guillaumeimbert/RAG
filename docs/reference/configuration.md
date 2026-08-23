@@ -42,7 +42,7 @@ different file on a per-invocation basis.
 |---|---|---|
 | `CHUNK_SIZE` | `1200` | Target chunk length in characters. |
 | `CHUNK_OVERLAP` | `200` | Overlap between consecutive chunks, in characters. |
-| `TOP_K` | `8` | Default number of hits for `query search` / `ask` (overridden by `-k`). |
+| `TOP_K` | `8` | Default number of hits for `query search` / `ask` (overridden by `-k`). Validated to be in `1..1000` (pgvector caps `hnsw.ef_search` at 1000); an out-of-range value is rejected up front, before any inference request. |
 | `MIN_SIMILARITY` | `0.0` | Cosine-similarity floor for vector search, in the range `[0, 1]` (validated; NaN, infinity and out-of-range values are rejected). `0.0` **disables** the filter and returns the nearest `TOP_K` regardless of score sign (cosine similarity ranges over `[-1, 1]`, so 0.0 is special-cased rather than used as a literal floor, which would drop every negative-scoring hit). A value above 0 drops hits below it, so an unrelated query can return **no** results instead of the nearest `TOP_K` (which `ask` would otherwise feed to the LLM as evidence). Tune against your embedding model's score distribution. |
 
 ## Constraints and interactions
