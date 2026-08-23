@@ -50,15 +50,19 @@ jobs:
           # so the test executables cannot build without it.
           opam install . --deps-only --with-test --yes
 
+      # The ocaml/setup-ocaml@v3 action sets up the opam switch but does not
+      # put its bin/ on PATH for direct invocation, so switch-local commands
+      # (dune, the built test binaries) are run through `opam exec --` to
+      # inherit the switch environment — the pattern from the action's README.
       - name: Build
-        run: dune build
+        run: opam exec -- dune build
 
       - name: Unit tests
-        run: ./_build/default/test/test.exe
+        run: opam exec -- ./_build/default/test/test.exe
 
       - name: End-to-end tests (against Postgres)
         run: |
           # Point the e2e test at the real ingest binary so the CLI
           # exit-code subtest runs.
           export RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe"
-          ./_build/default/test/e2e.exe
+          opam exec -- ./_build/default/test/e2e.exe
