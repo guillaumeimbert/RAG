@@ -48,16 +48,23 @@ all the files, in order, each in its own transaction):
 dune exec bin/migrate.exe -- up
 ```
 
-**Existing (compose-initialized) database.** A database created before the
-tracker existed (e.g. by `compose.yaml`'s `docker-entrypoint-initdb.d`, which
-applies the schema files without leaving `schema_migrations` records) needs a
-one-time `baseline` to record the current files as applied. After that, `migrate up`
+**Existing database (created before the tracker).** A database that already has
+the schema but no `schema_migrations` records (e.g. initialized by an older
+version of `compose.yaml`, which used to apply the schema files via
+`docker-entrypoint-initdb.d` without leaving records) needs a one-time
+`baseline`. It verifies the schema is present (the fingerprint columns must all
+exist) and records the current files as applied without re-running them; it
+refuses an empty or partially-initialized database. After that, `migrate up`
 applies only files added later:
 
 ```sh
-dune exec bin/migrate.exe -- baseline   # one-time transition
+dune exec bin/migrate.exe -- baseline   # one-time transition (verifies the schema)
 dune exec bin/migrate.exe -- status     # verify: all applied, none pending
 ```
+
+The current `compose.yaml` has no `docker-entrypoint-initdb.d` mount: `migrate up`
+is the sole schema authority, so a fresh volume is created empty and brought to
+the latest schema by `migrate up` (see **Reset the database**).
 
 **Adding a migration.** Add a new `schema/NNNN_name.sql` file (the next
 number). Never edit an applied file — its checksum is recorded in
@@ -107,14 +114,17 @@ podman compose exec -T db psql -U raguesslighter -d raguesslighter \
 dune exec bin/migrate.exe -- up
 ```
 
-Or nuke everything including the volume (destructive):
+Or nuke everything including the volume (destructive). The compose service
+no longer runs the migrations, so a fresh volume is empty; `migrate up` is the
+sole schema authority (it applies the files and records them):
 
 ```sh
 podman compose down -v && podman compose up -d && dune exec bin/migrate.exe -- up
 ```
 
-The compose initdb re-runs the schema files on first init (see below), then
-`migrate baseline` records them (or `migrate up` on a truly empty database).
+(For a database initialized before the migration tracker existed — the older
+compose initdb path — run the one-time `migrate baseline` instead, which
+verifies the schema is present and records the files without re-running them.)
 
 ## Change the embedding dimension
 

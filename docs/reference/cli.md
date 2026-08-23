@@ -118,7 +118,15 @@ Options: `-l N, --limit=N` (default `10`), `-s TICKER|CIK,
 
 Apply the numbered `schema/*.sql` migrations. Migrations are a deployment
 step (they are not run automatically by `Store.create`). Every command takes
-`-e FILE, --env-file=FILE` (default `.env`) and `--help[=FMT]`.
+`-e FILE, --env-file=FILE` (default `.env`) and `--help[=FMT]`. The tool only
+reads `DATABASE_URL` from the `.env` file — it does not require the inference,
+SEC, or chunking configuration.
+
+The applied history must be a **valid prefix** of the available files: every
+recorded version is a local file, and the recorded set is exactly the first
+`k` local versions (no gaps, no unknown versions, no missing files). A history
+that is not a valid prefix (e.g. `0001` and `0003` recorded but not `0002`)
+is an error on `up`, `status`, and `baseline`.
 
 ### `migrate up`
 
@@ -137,13 +145,17 @@ Never edit an applied migration — add a new `NNNN_*.sql` file instead.
 
 Report the applied and pending migrations (no changes). The `schema_migrations`
 table is created (and the advisory lock is taken) so the command is safe on an
-empty database.
+empty database. Refuses an inconsistent applied history.
 
 ### `migrate baseline`
 
 Record the current `schema/*.sql` files as applied **without re-running them**.
-This is the one-time transition for databases that were created before the
-tracker existed (e.g. by `compose.yaml`'s `docker-entrypoint-initdb.d`, which
-applies the schema files without leaving `schema_migrations` records). After
-`baseline`, `migrate up` applies only files added later. `baseline` refuses if
-a file's recorded checksum no longer matches.
+This is the one-time transition for databases that already have the schema but
+no `schema_migrations` records (e.g. initialized by an older version of
+`compose.yaml`, which used to apply the schema files via
+`docker-entrypoint-initdb.d` without leaving records). `baseline` **verifies
+the schema is present** (the fingerprint columns `chunks.embedding`,
+`holdings.position_index`, and `ownership_events.event_index` must all exist)
+and refuses an empty or partially-initialized database — run `migrate up`
+instead on those. It also refuses if a file's recorded checksum no longer
+matches. After `baseline`, `migrate up` applies only files added later.

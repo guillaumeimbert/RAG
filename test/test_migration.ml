@@ -73,4 +73,40 @@ let tests : (string * unit T.test_case list) list =
               ; "CREATE OR REPLACE FUNCTION f() RETURNS trigger AS $$\nBEGIN\n  INSERT INTO log VALUES (NEW.id, 'a;b');\n  RETURN NEW;\nEND\n$$ LANGUAGE plpgsql"
               ; "CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f()" ]);
       ] );
+    (
+      "validate_history_versions: applied prefix check",
+      [
+        T.test_case "valid full prefix" `Quick (fun () ->
+            T.check T.bool "should be Ok" true
+              (match Migration.validate_history_versions [ 1; 2; 3 ] [ 1; 2; 3 ]
+               with Ok () -> true | Error _ -> false));
+        T.test_case "valid partial prefix" `Quick (fun () ->
+            T.check T.bool "should be Ok" true
+              (match Migration.validate_history_versions [ 1; 2; 3 ] [ 1; 2 ]
+               with Ok () -> true | Error _ -> false));
+        T.test_case "empty history" `Quick (fun () ->
+            T.check T.bool "should be Ok" true
+              (match Migration.validate_history_versions [ 1; 2; 3 ] [ ]
+               with Ok () -> true | Error _ -> false));
+        T.test_case "gap is an error" `Quick (fun () ->
+            T.check T.bool "should be Error" true
+              (match Migration.validate_history_versions [ 1; 2; 3 ] [ 1; 3 ]
+               with Error _ -> true | Ok () -> false));
+        T.test_case "unknown version is an error" `Quick (fun () ->
+            T.check T.bool "should be Error" true
+              (match Migration.validate_history_versions [ 1; 2 ] [ 1; 5 ]
+               with Error _ -> true | Ok () -> false));
+        T.test_case "missing file is an error" `Quick (fun () ->
+            T.check T.bool "should be Error" true
+              (match Migration.validate_history_versions [ 1; 3 ] [ 1; 2 ]
+               with Error _ -> true | Ok () -> false));
+        T.test_case "more applied than local is an error" `Quick (fun () ->
+            T.check T.bool "should be Error" true
+              (match Migration.validate_history_versions [ 1; 2 ] [ 1; 2; 3 ]
+               with Error _ -> true | Ok () -> false));
+        T.test_case "applied out of order is normalized" `Quick (fun () ->
+            T.check T.bool "should be Ok" true
+              (match Migration.validate_history_versions [ 1; 2 ] [ 2; 1 ]
+               with Ok () -> true | Error _ -> false));
+      ] );
   ]

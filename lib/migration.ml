@@ -246,10 +246,16 @@ let apply_one (conn : Caqti_lwt.connection) (m : migration) : (unit, string) res
     let body () : (unit, string) result Lwt.t =
       Lwt.bind
         ( Lwt_list.fold_left_s
-            (fun _ stmt ->
-              Lwt.bind (exec_report conn stmt) (function
-                | Error msg -> Lwt.return (Error (msg ^ " (in " ^ m.name ^ ")"))
-                | Ok () -> Lwt.return (Ok ())))
+            (fun acc stmt ->
+              (* short-circuit on the first failure so the original error is
+                 preserved (a later statement would otherwise report "the
+                 current transaction is aborted"). *)
+              (match acc with
+              | Error _ -> Lwt.return acc
+              | Ok () ->
+                Lwt.bind (exec_report conn stmt) (function
+                  | Error msg -> Lwt.return (Error (msg ^ " (in " ^ m.name ^ ")"))
+                  | Ok () -> Lwt.return (Ok ()))))
             (Ok ()) stmts )
         (function
         | Error msg -> Lwt.return (Error msg)
@@ -286,12 +292,12 @@ let apply_one (conn : Caqti_lwt.connection) (m : migration) : (unit, string) res
     the connection on every path. The advisory lock and the
     [schema_migrations] table are set up before [f] runs. The advisory lock is
     held until the connection closes. *)
-let with_db (cfg : Config.t) (f : Caqti_lwt.connection -> (string, string) result Lwt.t)
+let with_db (url : string) (f : Caqti_lwt.connection -> (string, string) result Lwt.t)
     : (string, string) result Lwt.t =
   Lwt.catch
     (fun () ->
-      Lwt.bind (Caqti_lwt_unix.connect (Uri.of_string cfg.Config.database_url)) (function
-        | Error e -> Lwt.return (Error (Caqti_error.show e))
+      Lwt.bind (Caqti_lwt_unix.connect (Uri.of_string url)) (function
+        | Error e -> Lwt.return (Error ("connect: " ^ Caqti_error.show e))
         | Ok conn ->
           let module C = (val conn : Caqti_lwt.CONNECTION) in
           Lwt.finalize
@@ -328,24 +334,87 @@ let record_one (conn : Caqti_lwt.connection) (m : migration) : (string, string) 
     (fun e -> Lwt.return (Error (Printexc.to_string e)))
 
 (** Verify the checksum of every recorded migration that still has a file
-    (the immutability guard). A record with no file (deleted, or applied by
-    hand) is tolerated. *)
+    (the immutability guard). Stops on the first mismatch. A record with no
+    file is tolerated here (the [validate_history] check is the primary guard
+    against a missing file). *)
 let verify_checksums (migs : migration list) (applied : (int * string) list)
     : (unit, string) result Lwt.t =
   Lwt_list.fold_left_s
-    (fun _ (v, cs) ->
-      (match List.find_opt (fun m -> m.version = v) migs with
-      | Some m ->
-        let cs_now = checksum m.path in
-        if cs_now <> cs then
-          Lwt.return
-            (Error
-              ("migration " ^ m.name ^ " changed after being applied (recorded " ^ cs
-               ^ ", current " ^ cs_now ^ "); never edit an applied migration — add a new file instead"))
-        else Lwt.return (Ok ())
-      | None -> Lwt.return (Ok ())))
+    (fun acc (v, cs) ->
+      (match acc with
+      | Error _ -> Lwt.return acc
+      | Ok () ->
+        (match List.find_opt (fun m -> m.version = v) migs with
+        | Some m ->
+          let cs_now = checksum m.path in
+          if cs_now <> cs then
+            Lwt.return
+              (Error
+                ("migration " ^ m.name ^ " changed after being applied (recorded " ^ cs
+                 ^ ", current " ^ cs_now ^ "); never edit an applied migration — add a new file instead"))
+          else Lwt.return (Ok ())
+        | None -> Lwt.return (Ok ())
+      )))
     (Ok ()) applied
 
+(** The core history validation: the applied versions must be exactly the
+    first [k] local versions (no gaps, no unknown versions, no missing files).
+    Exposed for testing. *)
+let validate_history_versions (local : int list) (applied : int list)
+    : (unit, string) result =
+  let applied_versions = List.sort Int.compare applied in
+  let show_versions vs = "[" ^ String.concat ", " (List.map string_of_int vs) ^ "]" in
+  let k = List.length applied_versions in
+  if k > List.length local then
+    Error ("migration history is inconsistent: " ^ string_of_int k
+           ^ " applied but only " ^ string_of_int (List.length local)
+           ^ " migration file(s) present")
+  else
+    let prefix = List.init k (fun i -> List.nth local i) in
+    (if applied_versions = prefix then Ok ()
+     else Error ("migration history is inconsistent: applied " ^ show_versions applied_versions
+                 ^ " but expected the prefix " ^ show_versions prefix
+                 ^ "; applied migrations must be a contiguous prefix of the available files"))
+
+(** Check that the applied history is a valid prefix of the available
+    migrations: every recorded version must be a local file version, and the
+    recorded set must be exactly the first [k] local versions (no gaps, no
+    unknown versions, no missing files). A history that is not a valid prefix
+    (e.g. 0001 and 0003 recorded but not 0002, or a recorded version with no
+    file) is an error. *)
+let validate_history (migs : migration list) (applied : (int * string) list)
+    : (unit, string) result =
+  let local_versions = List.map (fun m -> m.version) migs in
+  let applied_versions = List.map fst applied in
+  validate_history_versions local_versions applied_versions
+
+(** Verify the database has the latest schema (the fingerprint columns of the
+    most recent migrations). Used by [baseline] to refuse an empty or
+    partially-initialized database. Checks the key columns that only exist
+    after all migrations have been applied. *)
+let verify_schema (conn : Caqti_lwt.connection) : (unit, string) result Lwt.t =
+  let req =
+    let open Caqti_request.Infix in
+    let open Caqti_type.Std in
+    ( ->! ) unit int
+      ( "SELECT count(*) FROM information_schema.columns WHERE \n"
+      ^ "  (table_name = 'chunks' AND column_name = 'embedding') OR \n"
+      ^ "  (table_name = 'holdings' AND column_name = 'position_index') OR \n"
+      ^ "  (table_name = 'ownership_events' AND column_name = 'event_index')" )
+  in
+  let module C = (val conn : Caqti_lwt.CONNECTION) in
+  Lwt.catch
+    (fun () ->
+      Lwt.bind (C.find req ()) (function
+        | Ok count ->
+          (if count = 3 then Lwt.return (Ok ())
+           else Lwt.return
+                 (Error ("baseline refused: the database has " ^ string_of_int count
+                         ^ " of the 3 expected schema fingerprint columns (chunks.embedding, "
+                         ^ "holdings.position_index, ownership_events.event_index); the schema "
+                         ^ "is empty or partial — run 'migrate up' instead of 'baseline' on this database")))
+        | Error e -> Lwt.return (Error (Caqti_error.show e))))
+    (fun e -> Lwt.return (Error (Printexc.to_string e)))
 (** The migrations not yet recorded (in ascending order). *)
 let pending_of (migs : migration list) (applied : (int * string) list) : migration list =
   let applied_versions = List.map fst applied in
@@ -365,91 +434,107 @@ let apply_list (conn : Caqti_lwt.connection) (migs : migration list)
   go "" migs
 
 (** Apply the missing migrations (in ascending order). Returns a human-readable
-    summary (the applied files, or "already up to date"). Every recorded
+    summary (the applied files, or "already up to date"). The applied history
+    must be a valid prefix of the available files, and every recorded
     migration's checksum is verified against its file (immutability guard); a
-    mismatch is an error. *)
-let up (cfg : Config.t) : (string, string) result Lwt.t =
+    mismatch or an inconsistent history is an error. *)
+let up (url : string) : (string, string) result Lwt.t =
   (match migration_files schema_dir with
   | Error msg -> Lwt.return (Error msg)
   | Ok migs ->
-    with_db cfg (fun conn ->
+    with_db url (fun conn ->
       Lwt.bind (applied_map conn) (function
         | Error msg -> Lwt.return (Error msg)
         | Ok applied ->
-          Lwt.bind (verify_checksums migs applied) (function
-            | Error msg -> Lwt.return (Error msg)
-            | Ok () ->
-              let pending = pending_of migs applied in
-              (match pending with
-              | [] -> Lwt.return (Ok "database is up to date (no migrations to apply)")
-              | _ ->
-                apply_list conn pending
-                |> Lwt.map (function
-                     | Ok s -> Ok (s ^ " — database is up to date")
-                     | Error e -> Error e))))))
+          (match validate_history migs applied with
+          | Error msg -> Lwt.return (Error msg)
+          | Ok () ->
+            Lwt.bind (verify_checksums migs applied) (function
+              | Error msg -> Lwt.return (Error msg)
+              | Ok () ->
+                let pending = pending_of migs applied in
+                (match pending with
+                | [] -> Lwt.return (Ok "database is up to date (no migrations to apply)")
+                | _ ->
+                  apply_list conn pending
+                  |> Lwt.map (function
+                       | Ok s -> Ok (s ^ " — database is up to date")
+                       | Error e -> Error e)))))))
 
 (** Truncate a string to [n] characters (for the status display). *)
 let short (s : string) (n : int) : string =
   if String.length s > n then String.sub s 0 n ^ "…" else s
 
-(** Report the applied and pending migrations (no changes). *)
-let status (cfg : Config.t) : (string, string) result Lwt.t =
+(** Report the applied and pending migrations (no changes). Refuses an
+    inconsistent applied history (a gap, an unknown version, or a missing
+    file) rather than guessing. *)
+let status (url : string) : (string, string) result Lwt.t =
   (match migration_files schema_dir with
   | Error msg -> Lwt.return (Error msg)
   | Ok migs ->
-    with_db cfg (fun conn ->
+    with_db url (fun conn ->
       Lwt.bind (applied_map conn) (function
         | Error msg -> Lwt.return (Error msg)
         | Ok applied ->
-          let pending = pending_of migs applied in
-          let lines =
-            List.map (fun (v, cs) -> Printf.sprintf "applied  %4d  %s" v (short cs 12)) applied
-            @ List.map (fun m -> Printf.sprintf "pending  %4d  %s" m.version m.name) pending
-          in
-          Lwt.return
-            (Ok
-              (String.concat "\n" lines
-               ^ Printf.sprintf "\n%d applied, %d pending" (List.length applied) (List.length pending))))))
+          (match validate_history migs applied with
+          | Error msg -> Lwt.return (Error msg)
+          | Ok () ->
+            let pending = pending_of migs applied in
+            let lines =
+              List.map (fun (v, cs) -> Printf.sprintf "applied  %4d  %s" v (short cs 12)) applied
+              @ List.map (fun m -> Printf.sprintf "pending  %4d  %s" m.version m.name) pending
+            in
+            Lwt.return
+              (Ok
+                (String.concat "\n" lines
+                 ^ Printf.sprintf "\n%d applied, %d pending" (List.length applied) (List.length pending)))))))
 
 (** Record the current migration files as applied without re-running them
     (the one-time transition for databases created before the tracker
-    existed, e.g. by compose's initdb). Refuses if a file's recorded checksum
-    no longer matches. *)
-let baseline (cfg : Config.t) : (string, string) result Lwt.t =
+    existed). Refuses an empty or partially-initialized database (the schema
+    fingerprint columns must all be present) and a file whose recorded
+    checksum no longer matches. The applied history must be a valid prefix. *)
+let baseline (url : string) : (string, string) result Lwt.t =
   (match migration_files schema_dir with
   | Error msg -> Lwt.return (Error msg)
   | Ok migs ->
-    with_db cfg (fun conn ->
+    with_db url (fun conn ->
       Lwt.bind (applied_map conn) (function
         | Error msg -> Lwt.return (Error msg)
         | Ok applied ->
-          let rec go (acc : string) = function
-            | [] -> Lwt.return (Ok (String.trim acc ^ " — baseline complete"))
-            | m :: rest ->
-              let step () : (string, string) result Lwt.t =
-                (match List.assoc_opt m.version applied with
-                | Some cs ->
-                  let cs_now = checksum m.path in
-                  if cs_now <> cs then
-                    Lwt.return (Error ("migration " ^ m.name ^ " changed after being applied; cannot baseline"))
-                  else Lwt.return (Ok ("skipped (already recorded) " ^ m.name))
-                | None -> record_one conn m)
-              in
-              Lwt.bind (step ()) (function
-                | Error msg -> Lwt.return (Error msg)
-                | Ok line -> go (acc ^ line ^ "\n") rest)
-          in
-          go "" migs)))
+          (match validate_history migs applied with
+          | Error msg -> Lwt.return (Error msg)
+          | Ok () ->
+            Lwt.bind (verify_schema conn) (function
+              | Error msg -> Lwt.return (Error msg)
+              | Ok () ->
+                let rec go (acc : string) = function
+                  | [] -> Lwt.return (Ok (String.trim acc ^ " — baseline complete"))
+                  | m :: rest ->
+                    let step () : (string, string) result Lwt.t =
+                      (match List.assoc_opt m.version applied with
+                      | Some cs ->
+                        let cs_now = checksum m.path in
+                        if cs_now <> cs then
+                          Lwt.return (Error ("migration " ^ m.name ^ " changed after being applied; cannot baseline"))
+                        else Lwt.return (Ok ("skipped (already recorded) " ^ m.name))
+                      | None -> record_one conn m)
+                    in
+                    Lwt.bind (step ()) (function
+                      | Error msg -> Lwt.return (Error msg)
+                      | Ok line -> go (acc ^ line ^ "\n") rest)
+                in
+                go "" migs)))))
 
 (** Apply the migrations with [version < upto] (a prefix of the migration
     list), recording each. Opens its own connection and takes the advisory
     lock (and creates the [schema_migrations] table). Used to create an "old
     schema snapshot" and to test the upgrade path. *)
-let snapshot_up_to (cfg : Config.t) (upto : int) : (string, string) result Lwt.t =
+let snapshot_up_to (url : string) (upto : int) : (string, string) result Lwt.t =
   (match migration_files schema_dir with
   | Error msg -> Lwt.return (Error msg)
   | Ok migs ->
-    with_db cfg (fun conn ->
+    with_db url (fun conn ->
       let prefix = List.filter (fun m -> m.version < upto) migs in
       apply_list conn prefix
       |> Lwt.map (function

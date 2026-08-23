@@ -357,6 +357,18 @@ let check (name : string) (cond : bool) : unit =
   then Printf.printf "  ok  %s\n%!" name
   else (Printf.printf "FAIL  %s\n%!" name; failwith name)
 
+(** True when [s] contains the substring [sub]. *)
+let contains (s : string) (sub : string) : bool =
+  let n = String.length s in
+  let m = String.length sub in
+  (if m = 0 then true
+   else if m > n then false
+   else
+     let rec go i =
+       if i + m > n then false else if String.sub s i m = sub then true else go (i + 1)
+     in
+     go 0)
+
 let () =
   if not (pg_available ())
   then
@@ -381,31 +393,10 @@ let () =
          database (the migration files use the production embedding dimension,
          so this is not the 8-dim scratch DB used by the ingest/query tests). *)
       let migrate_db = "raguesslighter_e2e_migrate" in
-      let migrate_cfg =
-        {
-          Config.database_url =
-            Printf.sprintf "postgresql://%s:%s@%s:%d/%s" pg_user pg_pass pg_host pg_port
-              migrate_db;
-          openai_base_url = "http://localhost:9/v1";
-          openai_api_key = "test";
-          openai_embed_base_url = "http://localhost:9/v1";
-          openai_embed_api_key = "test";
-          llm_model = "mock";
-          embedding_model = "mock";
-          Config.embedding_dim = embed_dim;
-          sec_user_agent = "test@example.com (e2e)";
-          sec_browse_edgar_base = "http://localhost:9";
-          sec_daily_index_base = "http://localhost:9";
-          sec_submissions_base = "http://localhost:9";
-          sec_fts_base = "http://localhost:9";
-          sec_archives_base = "http://localhost:9";
-          sec_company_tickers_url = "http://localhost:9";
-          forms = [ "10-K" ];
-          chunk_size = 900;
-          chunk_overlap = 120;
-          top_k = 8;
-          min_similarity = 0.0;
-        }
+      (* the migration tool only needs the database URL (no inference/SEC config) *)
+      let migrate_url =
+        Printf.sprintf "postgresql://%s:%s@%s:%d/%s" pg_user pg_pass pg_host pg_port
+          migrate_db
       in
       let migrate_tables (db : string) : string =
         (match
@@ -418,7 +409,7 @@ let () =
       (* (a) empty database -> latest schema *)
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
       pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
-      let up1 = Lwt_main.run (Migration.up migrate_cfg) in
+      let up1 = Lwt_main.run (Migration.up migrate_url) in
       (match up1 with
       | Error e -> (check "migration up (empty): applied" false; Printf.eprintf "  up: %s\n%!" e; exit 1)
       | Ok _ -> check "migration up (empty): applied" true);
@@ -434,14 +425,14 @@ let () =
       in
       check "migration up (empty): 6 migrations recorded" (mig_count = 6);
       (* (b) idempotent: a second up is a no-op *)
-      let up2 = Lwt_main.run (Migration.up migrate_cfg) in
+      let up2 = Lwt_main.run (Migration.up migrate_url) in
       (match up2 with
       | Error e -> (check "migration up (idempotent): no error" false; Printf.eprintf "  up: %s\n%!" e; exit 1)
       | Ok _ -> check "migration up (idempotent): no error" true);
       (* (c) old snapshot -> upgraded schema *)
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
       pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
-      let snap = Lwt_main.run (Migration.snapshot_up_to migrate_cfg 5) in
+      let snap = Lwt_main.run (Migration.snapshot_up_to migrate_url 5) in
       (match snap with
       | Error e -> (check "migration snapshot (v<5): applied" false; Printf.eprintf "  snapshot: %s\n%!" e; exit 1)
       | Ok _ -> check "migration snapshot (v<5): applied" true);
@@ -453,7 +444,7 @@ let () =
          | _ -> -1)
       in
       check "migration snapshot (v<5): 4 migrations recorded" (snap_count = 4);
-      let up3 = Lwt_main.run (Migration.up migrate_cfg) in
+      let up3 = Lwt_main.run (Migration.up migrate_url) in
       (match up3 with
       | Error e -> (check "migration up (upgrade): applied" false; Printf.eprintf "  up: %s\n%!" e; exit 1)
       | Ok _ -> check "migration up (upgrade): applied" true);
@@ -468,6 +459,57 @@ let () =
          | _ -> -1)
       in
       check "migration up (upgrade): 6 migrations recorded" (mig_count3 = 6);
+      (* (d) baseline against an empty database is refused *)
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      let baseline_empty = Lwt_main.run (Migration.baseline migrate_url) in
+      (match baseline_empty with
+      | Ok _ -> check "migration baseline (empty): refused" false
+      | Error e -> (check "migration baseline (empty): refused" true;
+                    check "migration baseline (empty): mentions refused" (contains e "refused")));
+      (* (e) baseline of a valid legacy schema records the files *)
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      let legacy = Lwt_main.run (Migration.snapshot_up_to migrate_url 7) in
+      (match legacy with
+      | Error e -> (check "migration baseline (legacy): snapshot applied" false; Printf.eprintf "  snapshot: %s\n%!" e; exit 1)
+      | Ok _ -> check "migration baseline (legacy): snapshot applied" true);
+      pg_exec migrate_db "DELETE FROM schema_migrations;";
+      let baseline_legacy = Lwt_main.run (Migration.baseline migrate_url) in
+      (match baseline_legacy with
+      | Ok _ -> check "migration baseline (legacy): recorded" true
+      | Error e -> (check "migration baseline (legacy): recorded" false; Printf.eprintf "  baseline: %s\n%!" e; exit 1));
+      let baseline_count =
+        (match pg_query migrate_db "SELECT count(*)::int FROM schema_migrations"
+         with [ [ n ] ] -> int_of_string n | _ -> -1)
+      in
+      check "migration baseline (legacy): 6 migrations recorded" (baseline_count = 6);
+      (* (f) an applied-history gap is refused *)
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      let _ = Lwt_main.run (Migration.up migrate_url) in
+      pg_exec migrate_db "DELETE FROM schema_migrations;";
+      pg_exec migrate_db
+        "INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (1, 'a', now()), (3, 'b', now());";
+      let up_gap = Lwt_main.run (Migration.up migrate_url) in
+      (match up_gap with
+      | Ok _ -> check "migration up (gap): refused" false
+      | Error e -> (check "migration up (gap): refused" true;
+                    check "migration up (gap): mentions inconsistent" (contains e "inconsistent")));
+      let status_gap = Lwt_main.run (Migration.status migrate_url) in
+      (match status_gap with
+      | Ok _ -> check "migration status (gap): refused" false
+      | Error _ -> check "migration status (gap): refused" true);
+      (* (g) concurrent up runs are serialized by the advisory lock (both succeed) *)
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ migrate_db ^ ";");
+      let up1 = ref (Error "not run") in
+      let up2 = ref (Error "not run") in
+      let j1 = Lwt.map (fun r -> up1 := r) (Migration.up migrate_url) in
+      let j2 = Lwt.map (fun r -> up2 := r) (Migration.up migrate_url) in
+      let () = Lwt_main.run (Lwt.join [ j1; j2 ]) in
+      check "migration up (concurrent): both succeed"
+        (match (!up1, !up2) with Ok _, Ok _ -> true | _ -> false);
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ migrate_db ^ ";");
 
       (* scratch database *)

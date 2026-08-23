@@ -14,11 +14,13 @@
 
 open Cmdliner
 
-let run_migrate ~env_file (f : Config.t -> (string, string) result Lwt.t) : (unit, string) result =
+(** Run a migration command. Only the database URL is loaded (the migration
+    tool does not need the inference/SEC/chunking configuration). *)
+let run_migrate ~env_file (f : string -> (string, string) result Lwt.t) : (unit, string) result =
   (try
-     let cfg = Config.load ~env_file () in
+     let url = Config.load_database_url ~env_file () in
      Lwt_main.run
-       ( Lwt.bind (f cfg) (function
+       ( Lwt.bind (f url) (function
          | Ok summary -> (Printf.printf "%s\n" summary; Lwt.return_unit)
          | Error msg -> Lwt.fail (Failure msg)) );
      Ok ()
@@ -36,7 +38,7 @@ let up_cmd =
   let env = env_arg () in
   let term =
     let open Term.Syntax in
-    let+ e = env in run_migrate ~env_file:e (fun cfg -> Migration.up cfg)
+    let+ e = env in run_migrate ~env_file:e (fun url -> Migration.up url)
   in
   Cmd.v (Cmd.info "up" ~doc:"Apply the missing migrations (transactionally, under an advisory lock).") term
 
@@ -44,7 +46,7 @@ let status_cmd =
   let env = env_arg () in
   let term =
     let open Term.Syntax in
-    let+ e = env in run_migrate ~env_file:e (fun cfg -> Migration.status cfg)
+    let+ e = env in run_migrate ~env_file:e (fun url -> Migration.status url)
   in
   Cmd.v (Cmd.info "status" ~doc:"Report the applied and pending migrations (no changes).") term
 
@@ -52,11 +54,11 @@ let baseline_cmd =
   let env = env_arg () in
   let term =
     let open Term.Syntax in
-    let+ e = env in run_migrate ~env_file:e (fun cfg -> Migration.baseline cfg)
+    let+ e = env in run_migrate ~env_file:e (fun url -> Migration.baseline url)
   in
   Cmd.v
     (Cmd.info "baseline"
-       ~doc:"Record the current migrations as applied without re-running them (one-time transition).")
+       ~doc:"Record the current migrations as applied without re-running them (one-time transition; verifies the schema is present).")
     term
 
 let main =

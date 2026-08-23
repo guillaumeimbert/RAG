@@ -169,6 +169,13 @@ let load ?(env_file = ".env") () : t =
        | None -> 0.0);
   }
 
+(** Load only the database URL, from the [.env] file (for tools that only
+    need the database — e.g. the migration runner — and should not require
+    the inference/SEC/chunking configuration). Raises [Missing] when
+    [DATABASE_URL] is absent. *)
+let load_database_url ?(env_file = ".env") () : string =
+  E.require (E.of_file env_file) "DATABASE_URL"
+
 (** True when [form] should be ingested: when its normalised code is in
     [FORMS] (both sides normalised, so [FORMS=13G] also matches EDGAR's
     "SCHEDULE 13G"), or when [FORMS] contains the special value ["ALL"]

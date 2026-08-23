@@ -4,14 +4,17 @@
 #   podman compose down         # stop (volume keeps data)
 #   podman compose down -v      # stop AND destroy data
 #
-# NOTE: schema/*.sql runs automatically ONLY on first initialization
-# (empty data volume, via the /docker-entrypoint-initdb.d mount below). That
-# first-init path leaves no schema_migrations records, so run
+# Schema: the compose service does NOT run the migrations. `migrate up` is the
+# sole schema authority (it applies schema/*.sql AND records them in
+# schema_migrations). After `podman compose up -d`, run
+#   dune exec bin/migrate.exe -- up
+# to bring the database to the latest schema. For a database initialized
+# before the migration tracker existed (the older compose initdb path), run
+# the one-time
 #   dune exec bin/migrate.exe -- baseline
-# once after the first init to adopt the migration tracker. On a truly empty
-# database, `dune exec bin/migrate.exe -- up` is the canonical path (it applies
-# the files AND records them). After adoption, apply new migrations with
-# `migrate up` (see docs/how-to/database.md).
+# instead (it verifies the schema is present and records the files without
+# re-running them). After adoption, apply new migrations with `migrate up`
+# (see docs/how-to/database.md).
 
 services:
   db:
@@ -42,7 +45,8 @@ services:
     shm_size: 1g
     volumes:
       - raguesslighter_pgdata:/var/lib/postgresql/data
-      - ./schema:/docker-entrypoint-initdb.d:ro,z  # :z = SELinux relabel (required under $HOME on Fedora)
+      # NOTE: no /docker-entrypoint-initdb.d mount — the schema is applied by
+      # `migrate up` (the sole schema authority), not by compose's initdb.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U raguesslighter -d raguesslighter"]
       interval: 5s
