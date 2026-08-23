@@ -63,11 +63,14 @@ dune exec bin/migrate.exe -- status     # verify: all applied, none pending
 ```
 
 On a database that already has most of the schema this is cheap (the
-corrective migrations are no-ops on the objects they created), but a couple
-of them scan the data: `0003_chunk_quality` re-adds `chunks_text_nonempty`
-after `DELETE`ing whitespace-only rows, so on a very large `chunks` table the
-replay runs a full scan of `chunks.text` and takes row locks for the length of
-the transaction. That is safe and transactional, but schedule the first
+corrective migrations are no-ops on the objects they created), with one
+exception: `0003_chunk_quality` `DROP`s and re-`ADD`s the
+`chunks_text_nonempty` constraint. Those `ALTER TABLE` statements take an
+`ACCESS EXCLUSIVE` lock on `chunks` that is held until the migration's
+transaction commits, so **all reads and writes to `chunks` are blocked** for
+the length of the migration (it also scans `chunks.text` to delete
+whitespace-only rows before the new constraint is validated). That is safe
+and transactional, but on a large `chunks` table schedule the first
 `migrate up` on a legacy production database for a short maintenance window.
 
 The current `compose.yaml` has no `docker-entrypoint-initdb.d` mount: `migrate up`
