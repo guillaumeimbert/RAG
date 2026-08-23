@@ -151,7 +151,10 @@ let load ?(env_file = ".env") () : t =
     top_k = E.require_int e "TOP_K";
   }
 
-(** True when [form] should be ingested: when it is in [FORMS], or when
-    [FORMS] contains the special value ["ALL"] (ingest every form). *)
+(** True when [form] should be ingested: when its normalised code is in
+    [FORMS] (both sides normalised, so [FORMS=13G] also matches EDGAR's
+    "SCHEDULE 13G"), or when [FORMS] contains the special value ["ALL"]
+    (ingest every form). *)
 let forms_allow (t : t) (form : string) : bool =
-  List.mem "ALL" t.forms || List.mem form t.forms
+  let f = Ownership.norm_form form in
+  List.mem "ALL" t.forms || List.mem f (List.map Ownership.norm_form t.forms)

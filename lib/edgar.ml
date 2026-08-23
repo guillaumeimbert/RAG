@@ -255,18 +255,51 @@ let filing_index_of cfg (filing : filing) : filing_index option Lwt.t =
 let get_document cfg url =
   Net.get ~throttle ~headers:(Net.sec_headers ~user_agent:cfg.Config.sec_user_agent ()) url
 
-(** URL of the primary document.
+(** Fetch any SEC URL under the shared throttle (probe/inspection tool). *)
+let fetch cfg url = get_document cfg url
+
+(** Accession number without dashes (the archives directory name). *)
+let acc_undashed (acc : string) : string =
+  acc |> String.to_seq |> Seq.filter (fun c -> c <> '-') |> String.of_seq
+
+(** Root directory (trailing slash) of an accession in the EDGAR archives.
 
     The index page is [data/{cik}/{acc-dashed}-index.htm], but the filing
     documents live in [data/{cik}/{acc-undashed}/]. We reuse the index URL's
-    prefix (up to the cik) and swap in the undashed accession as the document
-    directory. *)
-let primary_url (fi : filing_index) : string =
+    prefix (up to the cik) and swap in the undashed accession. *)
+let accession_root (fi : filing_index) : string =
   let prefix = Stringx.drop_suffix ~suffix:(fi.accession ^ "-index.htm") fi.index_url in
-  let acc_undashed =
-    fi.accession |> String.to_seq |> Seq.filter (fun c -> c <> '-') |> String.of_seq
+  prefix ^ acc_undashed fi.accession ^ "/"
+
+(** URL of the primary document (as listed in the index). *)
+let primary_url (fi : filing_index) : string = accession_root fi ^ fi.primary_document
+
+(** Directory (trailing slash) containing the primary document. *)
+let doc_dir (fi : filing_index) : string =
+  Stringx.drop_suffix ~suffix:fi.primary_document (primary_url fi)
+
+(** URL of the raw XML data document of an ownership filing.
+
+    Modern 13F-HR / 13G / 13D filings carry their machine-readable data XML
+    at the accession root as [primary_doc.xml]; the XSL-rendered variant
+    listed as primaryDocument ([xsl.../primary_doc.xml]) is styled HTML, not
+    data. Live-verified 2026-07 against accessions 0001045810-26-000065
+    (13F-HR) and 0001045810-26-000062 (13G). *)
+let primary_xml_url (fi : filing_index) : string = accession_root fi ^ "primary_doc.xml"
+
+(** URL of the 13F information table (accession root; the [xsl.../]
+    variant is styled HTML). *)
+let info_table_url (fi : filing_index) : string = accession_root fi ^ "information_table.xml"
+
+(** Public index page of an accession number: the accession starts with
+    the filer CIK (unpadded), which is the directory in the archives. *)
+let index_url_of_accession (base : string) (accession : string) : string =
+  let cik =
+    (match String.index_from_opt accession 0 '-' with
+     | Some i -> String.sub accession 0 i
+     | None -> accession)
   in
-  prefix ^ acc_undashed ^ "/" ^ fi.primary_document
+  base ^ "/" ^ cik ^ "/" ^ acc_undashed accession ^ "-index.htm"
 
 (* ------------------------------------------------------------------ *)
 (* Per-CIK submissions JSON and ticker resolution                       *)
@@ -320,3 +353,115 @@ let cik_of_ticker cfg (ticker : string) : string option Lwt.t =
     | exception Yojson.Json_error _ ->
       Lwt.fail (Failure "invalid JSON in company-tickers file")
     | j -> Lwt.return (find_cik j ticker))
+
+(* ------------------------------------------------------------------ *)
+(* Company-tickers file: cached, bidirectional (ticker and name)       *)
+(* ------------------------------------------------------------------ *)
+
+(** Normalised company name: upper case, letters and digits only
+    ("Nebius Group N.V." and "NEBIUS GROUP NV" -> "NEBIUSGROUPNV"). *)
+let norm_name (s : string) : string =
+  s
+  |> String.uppercase_ascii
+  |> String.to_seq
+  |> Seq.filter (fun c -> (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+  |> String.of_seq
+
+module Tickers : sig
+  type t
+  val of_json : Yojson.Safe.t -> t
+  val find : t -> string -> string option
+  (** [find t key] resolves an upper-cased ticker OR a normalised name
+      ([norm_name]) to a 10-digit zero-padded CIK. *)
+  val prefix : t -> string -> string option
+  (** [prefix t key] = the CIK when exactly one company's normalised name
+      starts with [key] (>= 4 chars, strictly longer name). Ambiguous or
+      short keys resolve to [None]. *)
+end = struct
+  type t = {
+    by_ticker : (string, string) Hashtbl.t;
+    by_name : (string, string) Hashtbl.t;
+  }
+
+  let find t key =
+    (match Hashtbl.find_opt t.by_ticker key with
+     | Some c -> Some c
+     | None -> Hashtbl.find_opt t.by_name key)
+
+  let prefix t key =
+    if String.length key < 4
+    then None
+    else
+      let matches = ref [] in
+      Hashtbl.iter
+        (fun name cik ->
+          if String.length name > String.length key
+          && String.starts_with name ~prefix:key
+          then matches := cik :: !matches)
+        t.by_name;
+      (match !matches with
+       | [ c ] -> Some c
+       | _ -> None)
+
+  let of_json (j : Yojson.Safe.t) : t =
+    let by_ticker = Hashtbl.create 16384 in
+    let by_name = Hashtbl.create 16384 in
+    let rows =
+      match j with
+      | `Assoc a -> List.map snd a
+      | other ->
+        raise (Json.Expecting { got = Json.show other; want = "a tickers object" })
+    in
+    List.iter
+      (fun row ->
+        match row with
+        | `Assoc fields ->
+          (match
+             ( List.assoc_opt "ticker" fields
+             , List.assoc_opt "cik_str" fields
+             , List.assoc_opt "title" fields )
+           with
+           | Some (`String ticker), Some c, Some (`String title) ->
+             let cik = pad_cik (string_of_int (Json.int c)) in
+             let t = String.uppercase_ascii ticker in
+             if not (Hashtbl.mem by_ticker t) then Hashtbl.add by_ticker t cik;
+             let n = norm_name title in
+             if n <> "" && not (Hashtbl.mem by_name n) then Hashtbl.add by_name n cik
+           | _ -> ())
+        | _ -> ())
+      rows;
+    { by_ticker; by_name }
+end
+
+(* One shared cached copy per process (the file changes rarely; a per-
+   process cache keeps an ingest run at one extra request). Keyed by URL
+   so a cfg change invalidates it. *)
+let tickers_cache : (string * Tickers.t) option ref = ref None
+
+(** [tickers_of cfg] = the company-tickers file as a [Tickers.t], fetched
+    once per process. *)
+let tickers_of cfg : Tickers.t Lwt.t =
+  match !tickers_cache with
+  | Some (url, t) when url = cfg.Config.sec_company_tickers_url -> Lwt.return t
+  | _ ->
+    Lwt.bind (sec_get cfg cfg.Config.sec_company_tickers_url) (fun s ->
+      match Yojson.Safe.from_string s with
+      | exception Yojson.Json_error _ ->
+        Lwt.fail (Failure "invalid JSON in company-tickers file")
+      | j ->
+        let t = Tickers.of_json j in
+        tickers_cache := Some (cfg.Config.sec_company_tickers_url, t);
+        Lwt.return t)
+
+(** [resolve cfg key] = ticker (any case) or company name (any case) ->
+    10-digit padded CIK, via the cached company-tickers file. *)
+let resolve cfg (key : string) : string option Lwt.t =
+  Lwt.bind (tickers_of cfg) (fun t ->
+    let direct = Tickers.find t (String.uppercase_ascii key) in
+    Lwt.return
+      (match direct with
+       | Some c -> Some c
+       | None ->
+         (match Tickers.find t (norm_name key) with
+          | Some c -> Some c
+          | None -> Tickers.prefix t (norm_name key))))

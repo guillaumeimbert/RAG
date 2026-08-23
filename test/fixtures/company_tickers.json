@@ -17,5 +17,15 @@
   "3": {
     "cik_str": 999,
     "title": "No Ticker Inc."
+  },
+  "4": {
+    "cik_str": 50863,
+    "ticker": "INTC",
+    "title": "Intel Corp"
+  },
+  "5": {
+    "cik_str": 1513845,
+    "ticker": "NBIS",
+    "title": "Nebius Group N.V."
   }
 }

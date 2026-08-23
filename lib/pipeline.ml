@@ -28,10 +28,21 @@ type stats = {
   docs : int;
   chunks : int;
   skipped : int;
+  events : int;
+  (** structured 13D/13G ownership events stored *)
+  positions : int;
+  (** structured 13F holdings stored *)
 }
 
+let empty_stats = { docs = 0; chunks = 0; skipped = 0; events = 0; positions = 0 }
+
 let show_stats s =
-  F.asprintf "docs=%d chunks=%d skipped=%d" s.docs s.chunks s.skipped
+  F.asprintf "docs=%d chunks=%d events=%d positions=%d skipped=%d"
+    s.docs
+    s.chunks
+    s.events
+    s.positions
+    s.skipped
 
 (* ------------------------------------------------------------------ *)
 (* Embedding                                                            *)
@@ -60,49 +71,194 @@ let embed_all (cfg : Config.t) (texts : string list) : (string * float list) lis
 (* One document                                                         *)
 (* ------------------------------------------------------------------ *)
 
-(** Fetch, parse, chunk, embed and store one filing. Returns the number of
-    chunks stored (0 when the document was already in the store). *)
-let ingest_job (store : Store.t) (job : job) : int Lwt.t =
+(** Result of one [ingest_job] attempt. *)
+type job_result =
+  | Skipped
+  (** form not in [FORMS], the filing is already in the store, or an error
+      made it unusable. *)
+  | Ingested of {
+      chunks : int;
+      events : int;
+      positions : int;
+    }
+
+(** [Ownership.event] -> upsertable row (dates as ISO strings). *)
+let event_row (e : Ownership.event) : Store.own_event_row =
+  { Store.accession = e.accession
+  ; form = e.form
+  ; event_date = Date.to_string e.event_date
+  ; filed_at = Date.to_string e.filed_at
+  ; filer_cik = e.filer_cik
+  ; filer_name = e.filer_name
+  ; subject_cik = e.subject_cik
+  ; subject_name = e.subject_name
+  ; subject_cusip = e.subject_cusip
+  ; class_name = e.class_name
+  ; shares = e.shares
+  ; percent = e.percent
+  ; passive = e.passive
+  ; is_amendment = e.is_amendment
+  ; index_url = e.index_url }
+
+(** Chunk, embed and store ready [blocks]. Returns the number of chunks
+    stored. *)
+let store_blocks (store : Store.t) (job : job) (blocks0 : Chunk.block list) : int Lwt.t =
   let cfg = store.Store.cfg in
   let index = job.index in
-  let doc_id = index.accession in
-  if Config.forms_allow cfg index.form = false
+  let blocks =
+    blocks0 |> Chunk.chunks ~size:cfg.Config.chunk_size ~overlap:cfg.Config.chunk_overlap
+  in
+  let n = List.length blocks in
+  if n = 0
   then Lwt.return 0
   else
-    Lwt.bind (Store.doc_exists store doc_id) (fun exists ->
-      if exists
-      then Lwt.return 0
+    Lwt.bind (embed_all cfg (List.map (fun b -> b.Chunk.text) blocks)) (fun embedded ->
+      let rows =
+        List.mapi
+          (fun i (b, (_text, vec)) ->
+            { Store.doc_id = index.accession
+            ; company = index.company
+            ; cik = index.cik
+            ; ticker = index.ticker
+            ; form = index.form
+            ; filed_at = Date.to_string index.filed_at
+            ; section = b.Chunk.section
+            ; chunk_index = i
+            ; text = b.Chunk.text
+            ; embedding = Store.vector_to_string vec })
+          (List.combine blocks embedded)
+      in
+      Lwt.bind (Store.upsert_chunks store rows) (fun () -> Lwt.return n))
+
+(** Narrative forms (10-K / 10-Q / 8-K / ...): HTML -> text -> chunks ->
+    vectors. *)
+let ingest_prose_filing (store : Store.t) (job : job) : job_result Lwt.t =
+  Lwt.bind (Edgar.get_document store.Store.cfg job.primary_url) (fun html ->
+    store_blocks store job (Html_text.of_html html)
+    >>= fun n -> Lwt.return (Ingested { chunks = n; events = 0; positions = 0 }))
+
+(** 13G / 13D: raw XML -> structured ownership events; the narrative
+    (items / comments) additionally goes through the vector path so it
+    stays answerable by the LLM. *)
+let ingest_13gd (store : Store.t) (job : job) : job_result Lwt.t =
+  let cfg = store.Store.cfg in
+  let index = job.index in
+  let meta =
+    { Ownership.accession = index.accession
+    ; filed_at = index.filed_at
+    ; index_url = index.index_url }
+  in
+  Lwt.bind (Edgar.get_document cfg (Edgar.primary_xml_url index)) (fun xml ->
+    let (events, prose) =
+      (match Ownership.classify index.form with
+       | Ownership.Form13d -> Ownership.parse_13d xml ~meta ~form:index.form
+       | _ -> Ownership.parse_13g xml ~meta ~form:index.form)
+    in
+    let rows = List.map event_row events in
+    Lwt.bind (Store.upsert_own_events store rows) (fun () ->
+      if prose = ""
+      then Lwt.return (Ingested { chunks = 0; events = List.length events; positions = 0 })
       else
-        Lwt.bind (Edgar.get_document cfg job.primary_url)
-          (fun html ->
-            let blocks =
-              Html_text.of_html html
-              |> Chunk.chunks ~size:cfg.Config.chunk_size ~overlap:cfg.Config.chunk_overlap
-            in
-            let n = List.length blocks in
-            if n = 0
-            then Lwt.return 0
-            else
-              Lwt.bind (embed_all cfg (List.map (fun b -> b.Chunk.text) blocks))
-                (fun embedded ->
-                  let rows =
-                    List.mapi
-                      (fun i (b, (text, vec)) ->
-                        {
-                          Store.doc_id;
-                          company = index.company;
-                          cik = index.cik;
-                          ticker = index.ticker;
-                          form = index.form;
-                          filed_at = Date.to_string index.filed_at;
-                          section = b.Chunk.section;
-                          chunk_index = i;
-                          text;
-                          embedding = Store.vector_to_string vec;
-                        })
-                      (List.combine blocks embedded)
-                  in
-                  Lwt.bind (Store.upsert_chunks store rows) (fun () -> Lwt.return n))))
+        store_blocks store job
+          [{ Chunk.section = Ownership.norm_form index.form ^ " — items & comments";
+             text = prose }]
+        >>= fun n ->
+        Lwt.return (Ingested { chunks = n; events = List.length events; positions = 0 })))
+
+(** 13F-HR: raw XML -> structured holdings. Issuer CIKs are resolved
+    best-effort against the company-tickers file; unresolved issuers keep
+    an empty CIK and remain queryable by name. *)
+let ingest_13f (store : Store.t) (job : job) : job_result Lwt.t =
+  let cfg = store.Store.cfg in
+  let index = job.index in
+  let meta =
+    { Ownership.accession = index.accession
+    ; filed_at = index.filed_at
+    ; index_url = index.index_url }
+  in
+  (* A missing information table (rare) does not block the cover: the
+     filing is recorded with zero positions. *)
+  let table_opt : string option Lwt.t =
+    Lwt.catch
+      (fun () ->
+        Edgar.get_document cfg (Edgar.info_table_url index)
+        >>= fun s -> Lwt.return (Some s))
+      (function
+        | Net.Http_error e ->
+          Printf.eprintf "  %s: no information table (%s)\n%!" index.accession (Net.show_error e);
+          Lwt.return None
+        | e -> Lwt.fail e)
+  in
+  Lwt.bind (Edgar.get_document cfg (Edgar.primary_xml_url index)) (fun cover_xml ->
+    Lwt.bind table_opt (fun table ->
+      let t13f = Ownership.parse_13f cover_xml ~meta ~form:index.form table in
+      let resolve (name : string) : string Lwt.t =
+        if name = ""
+        then Lwt.return ""
+        else
+          Lwt.bind (Edgar.resolve cfg name) (function
+            | Some c -> Lwt.return c
+            | None ->
+              Printf.eprintf "  %s: issuer not resolved: %s\n%!" index.accession name;
+              Lwt.return "")
+      in
+      Lwt_list.map_s resolve (List.map (fun (p : Ownership.position) -> p.issuer_name) t13f.positions)
+      >>= fun ciks ->
+      let rows =
+        List.map2
+          (fun (p : Ownership.position) (cik : string) ->
+            { Store.accession = index.accession
+            ; filer_cik = t13f.filer_cik
+            ; filer_name = t13f.filer_name
+            ; period = Date.to_string t13f.period
+            ; filed_at = Date.to_string index.filed_at
+            ; issuer_name = p.issuer_name
+            ; issuer_cusip = p.issuer_cusip
+            ; issuer_cik = cik
+            ; class_name = p.class_name
+            ; value_usd = p.value_usd
+            ; shares = p.shares
+            ; prnamt_type = p.prnamt_type
+            ; discretion = p.discretion
+            ; vote_sole = p.vote_sole
+            ; vote_shared = p.vote_shared
+            ; vote_none = p.vote_none })
+          t13f.positions ciks
+      in
+      Lwt.bind (Store.upsert_holdings store rows) (fun () ->
+        Lwt.return (Ingested { chunks = 0; events = 0; positions = List.length rows }))))
+
+(** Route one filing to its pipeline by form class. *)
+let ingest_job (store : Store.t) (job : job) : job_result Lwt.t =
+  let cfg = store.Store.cfg in
+  let doc_id = job.index.accession in
+  if Config.forms_allow cfg job.index.form = false
+  then Lwt.return Skipped
+  else
+    Lwt.bind (Store.filing_exists store doc_id) (fun exists ->
+      if exists
+      then Lwt.return Skipped
+      else
+        match Ownership.classify job.index.form with
+        | Ownership.Prose -> ingest_prose_filing store job
+        | Ownership.Form13g | Ownership.Form13d -> ingest_13gd store job
+        | Ownership.Form13f -> ingest_13f store job)
+
+(** [ingest_job] with per-filing fault isolation: a fetch/parse error
+    skips that filing (with a warning) instead of aborting the run. *)
+let ingest_job_safe (store : Store.t) (job : job) : job_result Lwt.t =
+  Lwt.catch
+    (fun () -> ingest_job store job)
+    (function
+      | Edgar.Failure msg ->
+        Printf.eprintf "  skip %s: %s\n%!" job.index.accession msg;
+        Lwt.return Skipped
+      | Net.Http_error e ->
+        Printf.eprintf "  skip %s: %s\n%!" job.index.accession (Net.show_error e);
+        Lwt.return Skipped
+      | e ->
+        Printf.eprintf "  skip %s: %s\n%!" job.index.accession (Printexc.to_string e);
+        Lwt.return Skipped)
 
 (* ------------------------------------------------------------------ *)
 (* Per-day                                                              *)
@@ -110,7 +266,7 @@ let ingest_job (store : Store.t) (job : job) : int Lwt.t =
 
 let ingest_day (store : Store.t) (day : Date.t) : stats Lwt.t =
   let cfg = store.Store.cfg in
-  let stats = ref { docs = 0; chunks = 0; skipped = 0 } in
+  let stats = ref empty_stats in
   Lwt.bind (Edgar.filings_of_day cfg day) (fun filings ->
     Lwt_list.iter_s
       (fun f ->
@@ -124,10 +280,16 @@ let ingest_day (store : Store.t) (day : Date.t) : stats Lwt.t =
           | Some index ->
             if Config.forms_allow cfg index.form
             then
-              Lwt.bind (ingest_job store (make_job index)) (fun n ->
-                if n > 0
-                then (stats := { !stats with docs = !stats.docs + 1; chunks = !stats.chunks + n })
-                else stats := { !stats with skipped = !stats.skipped + 1 };
+              Lwt.bind (ingest_job_safe store (make_job index)) (fun r ->
+                (match r with
+                 | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
+                 | Ingested r ->
+                   stats :=
+                     { !stats with
+                       docs = !stats.docs + 1;
+                       chunks = !stats.chunks + r.chunks;
+                       events = !stats.events + r.events;
+                       positions = !stats.positions + r.positions });
                 Lwt.return_unit)
             else (stats := { !stats with skipped = !stats.skipped + 1 }; Lwt.return_unit)))
       filings
@@ -144,12 +306,14 @@ let business_days (from : Date.t) (to_ : Date.t) : Date.t list =
 
 let ingest_range (store : Store.t) (from : Date.t) (to_ : Date.t) : stats Lwt.t =
   let days = business_days from to_ in
-  let stats = ref { docs = 0; chunks = 0; skipped = 0 } in
+  let stats = ref empty_stats in
   let add (s : stats) =
     stats :=
       { docs = !stats.docs + s.docs;
         chunks = !stats.chunks + s.chunks;
-        skipped = !stats.skipped + s.skipped }
+        skipped = !stats.skipped + s.skipped;
+        events = !stats.events + s.events;
+        positions = !stats.positions + s.positions }
   in
   Lwt_list.iter_s
     (fun day ->
@@ -281,7 +445,7 @@ let jobs_of_submissions (cfg : Config.t) (j : Yojson.Safe.t) : job list =
     filings (the most recent are first). *)
 let ingest_cik ?limit (store : Store.t) (cik : string) : stats Lwt.t =
   let cfg = store.Store.cfg in
-  let stats = ref { docs = 0; chunks = 0; skipped = 0 } in
+  let stats = ref empty_stats in
   Lwt.bind (Edgar.submissions cfg cik) (fun j ->
     let jobs =
       (match limit with
@@ -290,10 +454,16 @@ let ingest_cik ?limit (store : Store.t) (cik : string) : stats Lwt.t =
     in
     Lwt_list.iter_s
       (fun job ->
-        Lwt.bind (ingest_job store job) (fun n ->
-          if n > 0
-          then (stats := { !stats with docs = !stats.docs + 1; chunks = !stats.chunks + n })
-          else stats := { !stats with skipped = !stats.skipped + 1 };
+        Lwt.bind (ingest_job_safe store job) (fun r ->
+          (match r with
+           | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
+           | Ingested r ->
+             stats :=
+               { !stats with
+                 docs = !stats.docs + 1;
+                 chunks = !stats.chunks + r.chunks;
+                 events = !stats.events + r.events;
+                 positions = !stats.positions + r.positions });
           Lwt.return_unit))
       jobs
     >>= fun () -> Lwt.return !stats)

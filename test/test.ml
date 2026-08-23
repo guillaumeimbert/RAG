@@ -12,4 +12,6 @@ let () =
     @ Test_openai.tests
     @ Test_pipeline.tests
     @ Test_html_text.tests
-    @ Test_net.tests )
+    @ Test_net.tests
+    @ Test_xml.tests
+    @ Test_ownership.tests )

@@ -51,9 +51,25 @@ let pg_available () : bool =
 
 let fixture name = Test_fixtures.read_text (Test_fixtures.fix name)
 
+(** [find_sub s sub] = index of the first occurrence of [sub] in [s]. *)
+let find_sub (s : string) (sub : string) : int option =
+  let n = String.length sub in
+  if n = 0 || String.length s < n then None
+  else
+    let i = ref 0 in
+    let r = ref None in
+    while !i + n <= String.length s && Option.is_none !r do
+      if String.sub s !i n = sub then r := Some !i else incr i
+    done;
+    !r
+
 (** Rewrite the single vector(N) column declaration in the schema to vector(dim). *)
-let rewrite_dim sql dim =
-  let start_i = String.index_of sql "vector(" in
+let rewrite_dim (dim : int) (sql : string) =
+  let start_i =
+    (match find_sub sql "vector(" with
+     | Some i -> i
+     | None -> failwith "vector( not found in schema")
+  in
   let close_i = String.index_from sql start_i ')' in
   String.sub sql 0 start_i
   ^ Printf.sprintf "vector(%d)" dim
@@ -106,6 +122,7 @@ let openai_handler (path : string) (body : string) : Mock.resp option =
 
 let edgar_handler (path : string) (_body : string) : Mock.resp option =
   let html s = Some { Mock.code = 200; content_type = "text/html"; body = s } in
+  let xml s = Some { Mock.code = 200; content_type = "text/xml"; body = s } in
   let doc = fixture "nvda_8k.html" in
   (match path with
   | "/Archives/edgar/data/1045810/0001045810-26-000021-index.htm" ->
@@ -115,6 +132,13 @@ let edgar_handler (path : string) (_body : string) : Mock.resp option =
   | "/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm" -> html doc
   | "/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm" -> html doc
   | "/Archives/edgar/data/1045810/000104581026000069/nvda-20260817.htm" -> html doc
+  (* ownership filings: raw data XML at the accession root *)
+  | "/Archives/edgar/data/1045810/000104581026000065/primary_doc.xml" ->
+    xml (fixture "13f_nvda_primary.xml")
+  | "/Archives/edgar/data/1045810/000104581026000065/information_table.xml" ->
+    xml (fixture "13f_nvda_table.xml")
+  | "/Archives/edgar/data/1045810/000104581026000062/primary_doc.xml" ->
+    xml (fixture "13g_nvda.xml")
   | "/submissions/CIK0001045810.json" ->
     Some { Mock.code = 200; content_type = "application/json"; body = fixture "nvda_submissions.json" }
   | "/files/company_tickers.json" ->
@@ -146,7 +170,9 @@ let () =
         Test_fixtures.read_text (Test_fixtures.schema_file "0001_init.sql")
         |> rewrite_dim embed_dim
       in
+      let schema2 = Test_fixtures.read_text (Test_fixtures.schema_file "0002_ownership.sql") in
       pg_exec scratch_db schema;
+      pg_exec scratch_db schema2;
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;
 
       (* mock servers *)
@@ -174,7 +200,7 @@ let () =
           sec_fts_base = edgar_base ^ "/full-text/search";
           sec_archives_base = edgar_base ^ "/Archives/edgar/data";
           sec_company_tickers_url = edgar_base ^ "/files/company_tickers.json";
-          forms = [ "10-K"; "10-Q"; "8-K" ];
+          forms = [ "10-K"; "10-Q"; "8-K"; "13F-HR"; "13G" ];
           chunk_size = 900;
           chunk_overlap = 120;
           top_k = 8;
@@ -182,17 +208,22 @@ let () =
       in
       let store = Lwt_main.run (Store.create cfg) in
 
-      (* 1. ingest_cik: submissions JSON -> 8-K document -> chunks -> store *)
+      (* 1. ingest_cik: submissions JSON -> 8-K (vector path) + 13F-HR and
+         13G (structured path) *)
       let s1 = Lwt_main.run (Pipeline.ingest_cik store "1045810") in
       Printf.printf "  ingest_cik #1   %s\n%!" (Pipeline.show_stats s1);
-      check "ingest_cik: one document ingested" (s1.Pipeline.docs = 1);
-      check "ingest_cik: chunks stored" (s1.Pipeline.chunks >= 5);
-      check "ingest_cik: other forms skipped" (s1.Pipeline.skipped = 4);
+      check "ingest_cik: three filings ingested" (s1.Pipeline.docs = 3);
+      check "ingest_cik: 8-K chunks + 13G prose stored" (s1.Pipeline.chunks >= 5);
+      check "ingest_cik: one ownership event" (s1.Pipeline.events = 1);
+      check "ingest_cik: eight 13F positions" (s1.Pipeline.positions = 8);
+      check "ingest_cik: Form 4 rows skipped" (s1.Pipeline.skipped = 2);
 
       (* 2. idempotency: same day again -> nothing new *)
       let s2 = Lwt_main.run (Pipeline.ingest_cik store "1045810") in
       Printf.printf "  ingest_cik #2   %s\n%!" (Pipeline.show_stats s2);
-      check "idempotency: no document re-ingested" (s2.Pipeline.docs = 0);
+      check "idempotency: no filing re-ingested" (s2.Pipeline.docs = 0);
+      check "idempotency: no re-ingested events or positions"
+        (s2.Pipeline.events = 0 && s2.Pipeline.positions = 0);
       check "idempotency: nothing skipped differently" (s2.Pipeline.skipped = 5);
 
       (* 3. ingest_job from a real EDGAR index page (NVDA 10-K) *)
@@ -209,15 +240,27 @@ let () =
         | Some fi -> fi
         | None -> failwith "parse_index failed on the NVDA 10-K fixture"
       in
-      let n3 = Lwt_main.run (Pipeline.ingest_job store (Pipeline.make_job fi)) in
+      let r3 = Lwt_main.run (Pipeline.ingest_job store (Pipeline.make_job fi)) in
+      let n3 =
+        match r3 with
+        | Pipeline.Ingested r -> r.chunks
+        | Pipeline.Skipped -> failwith "ingest_job: 10-K unexpectedly skipped"
+      in
       Printf.printf "  ingest_job 10-K %d chunks\n%!" n3;
       check "ingest_job: 10-K chunks stored" (n3 >= 5);
 
       (* 4. store statistics + retrieval *)
-      let (chunks, docs) = Lwt_main.run (Store.stats store) in
-      Printf.printf "  store stats: %d chunks, %d docs\n%!" chunks docs;
-      check "stats: two documents" (docs = 2);
-      check "stats: chunk count consistent" (chunks = s1.Pipeline.chunks + n3);
+      let st = Lwt_main.run (Store.stats store) in
+      Printf.printf "  store stats: %d chunks, %d docs, %d events, %d holdings\n%!"
+        st.Store.chunks
+        st.Store.docs
+        st.Store.ownership_events
+        st.Store.holdings;
+      check "stats: three documents" (st.Store.docs = 3);
+      check "stats: chunk count consistent"
+        (st.Store.chunks = s1.Pipeline.chunks + n3);
+      check "stats: one ownership event" (st.Store.ownership_events = 1);
+      check "stats: eight holdings" (st.Store.holdings = 8);
 
       let query = Store.vector_to_string (mock_vector "what?") in
       let hits = Lwt_main.run (Store.search store ~query ~top_k:5 ()) in
@@ -233,7 +276,24 @@ let () =
 
       let hk = Lwt_main.run (Store.search store ~query ~top_k:5 ~form:(Some "8-K") ()) in
       check "search: form filter honoured"
-        (List.for_all (fun h -> h.Store.form = "8-K") hk);
+        (List.for_all (fun (h : Store.hit) -> h.Store.form = "8-K") hk);
+
+      (* 4b. structured ownership retrieval (SQL path) *)
+      let holders = Lwt_main.run (Store.holders_of store ~subject_cik:"0001513845" ~limit:10) in
+      check "holders: NVIDIA in Nebius"
+        ( List.length holders = 1
+        && (match List.hd holders with
+             | h ->
+               h.Store.filer_cik = "0001045810"
+               && h.Store.percent = 9.3
+               && h.Store.shares = 22256412.0
+               && h.Store.passive = true ) );
+      (* issuer CIK was resolved by name against the tickers file *)
+      let pos = Lwt_main.run (Store.positions_of store ~issuer_cik:"0001513845" ~issuer_name:"" ~limit:10) in
+      check "positions: Nebius held by the NVIDIA 13F"
+        ( List.length pos = 1
+        && (match List.hd pos with
+             | p -> p.Store.filer_cik = "0001045810" && p.Store.issuer_name = "NEBIUS GROUP N.V.") );
 
       (* 5. ticker resolution *)
       let nvda = Lwt_main.run (Edgar.cik_of_ticker cfg "NVDA") in

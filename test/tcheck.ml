@@ -14,6 +14,8 @@ let api_error_pred (e : exn) = match e with Openai.Api_error _ -> true | _ -> fa
 
 let http_error_pred (e : exn) = match e with Net.Http_error _ -> true | _ -> false
 
+let xml_parse_error_pred (e : exn) = match e with Xml.Parse_error _ -> true | _ -> false
+
 (** [contains s sub] — [String.contains] only tests single characters; this
     one tests substrings. *)
 let contains (s : string) (sub : string) : bool =

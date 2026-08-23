@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13D/A</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0001326380</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <amendmentNo>4</amendmentNo>
+      <securitiesClassTitle>Common Stock, $0.001 par value per share</securitiesClassTitle>
+      <dateOfEvent>07/15/2026</dateOfEvent>
+      <previouslyFiledFlag>false</previouslyFiledFlag>
+      <issuerInfo>
+        <issuerCIK>0001065088</issuerCIK>
+        <issuerCusips>
+          <issuerCusipNumber>278642103</issuerCusipNumber>
+        </issuerCusips>
+        <issuerName>eBay Inc.</issuerName>
+        <address>
+          <street1 xmlns="http://www.sec.gov/edgar/common">2025 Hamilton Avenue</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">San Jose</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">CA</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">95125</zipCode>
+        </address>
+      </issuerInfo>
+      <authorizedPersons>
+        <notificationInfo>
+          <personName>Mark H. Robinson</personName>
+          <personPhoneNum>(817) 424-2000</personPhoneNum>
+          <personAddress>
+            <street1 xmlns="http://www.sec.gov/edgar/common">GameStop Corp.</street1>
+            <street2 xmlns="http://www.sec.gov/edgar/common">625 Westport Parkway</street2>
+            <city xmlns="http://www.sec.gov/edgar/common">Grapevine</city>
+            <stateOrCountry xmlns="http://www.sec.gov/edgar/common">TX</stateOrCountry>
+            <zipCode xmlns="http://www.sec.gov/edgar/common">76051</zipCode>
+          </personAddress>
+        </notificationInfo>
+      </authorizedPersons>
+    </coverPageHeader>
+    <reportingPersons>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001326380</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>GameStop Corp.</reportingPersonName>
+        <fundType>WC</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+        <soleVotingPower>43390383</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>43390383</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+        <aggregateAmountOwned>43390383</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>9.8</percentOfClass>
+        <typeOfReportingPerson>CO</typeOfReportingPerson>
+        <commentContent>Rounded up to the nearest tenth of a percent and based on the 444 million shares of Common Stock stated by the Issuer as being outstanding as of April 24, 2026 in its Form 10-Q, filed with the United States Securities and Exchange Commission on April 29, 2026 (the "2026 Q1 10-Q").</commentContent>
+      </reportingPersonInfo>
+    </reportingPersons>
+    <items1To7>
+      <item1>
+        <securityTitle>Common Stock, $0.001 par value per share</securityTitle>
+        <issuerName>eBay Inc.</issuerName>
+        <issuerPrincipalAddress>
+          <street1 xmlns="http://www.sec.gov/edgar/common">2025 Hamilton Avenue</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">San Jose</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">CA</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">95125</zipCode>
+        </issuerPrincipalAddress>
+        <commentText>Explanatory Note:
+
+This Amendment No. 4 to Schedule 13D (this "Amendment No. 4") amends and supplements the Schedule 13D filed by the Reporting Person on May 4, 2026, as amended by Amendment No. 1 filed on May 19, 2026, Amendment No. 2 filed on May 28, 2026 and Amendment No. 3 filed on June 5, 2026 (the "Original 13D", and as so amended and supplemented by this Amendment No. 4, the "Schedule 13D") relating to the Common Stock of the Issuer.  Capitalized terms used in this Amendment No. 4 but not otherwise defined shall have the respective meanings ascribed to them in the Original 13D.</commentText>
+      </item1>
+      <item3>
+        <fundsSource>Item 3 to the Original 13D is hereby supplemented as follows:
+
+"Between June 8, 2026 and June 15, 2026, GameStop purchased 3,516,077 shares of Common Stock for a total purchase price of $381,301,906.81 including fees and expenses.
+
+On July 15, 2026, GameStop notified the Issuer that it was electing to physically settle all of the 39,046,658 shares of Common Stock underlying the Put/Call Pairs, which such physical settlement occurred July 17, 2026.  The total net premium paid, in the aggregate, by the Reporting Person for the 39,046,658 Put/Call Pairs was $9,832,906.61 and the final strike price, on an aggregated and averaged basis, was $101.295333. The total consideration paid to acquire the 39,046,658 shares underlying the Put/Call Pairs was $3,965,077,113.19. The source of funds used by GameStop to physically settle such shares of Common Stock was cash from its working capital.
+
+No portion of the purchase price for such shares of Common Stock was borrowed by the Reporting Person for the purpose of acquiring, holding, trading or voting any securities discussed in this Item 3.
+
+To the knowledge of the Reporting Person, as of the filing of this Amendment No. 4, none of the executive officers or directors of the Reporting Person listed on Exhibit 99.3 have anything additional to disclose in response to this Item."</fundsSource>
+      </item3>
+      <item4>
+        <transactionPurpose>Item 4 of the Original 13D is hereby supplemented as follows:
+
+"Item 3 to Amendment No. 4 is hereby incorporated by reference.
+
+To the knowledge of the Reporting Person, as of the filing of this Amendment No. 4, none of the executive officers or directors of the Reporting Person listed on Exhibit 99.3 have anything additional to disclose in response to this Item."</transactionPurpose>
+      </item4>
+      <item5>
+        <percentageOfClassSecurities>Item 5(a) of the Original 13D is hereby amended and restated in its entirety as follows:
+
+"As of the filing of this Amendment No. 4, the Reporting Person beneficially owns 43,390,383 shares of Common Stock (the "Subject Shares").  The Subject Shares represent approximately 9.8% of the Issuer's outstanding shares of Common Stock, based on the 444 million shares of Common Stock stated by the Issuer as being outstanding as of April 24, 2026 in the Issuer's 2026 Q1 10-Q.  The Reporting Person has the sole power to vote or direct the vote and to dispose or to direct the disposition of all of the Subject Shares.
+
+To the knowledge of the Reporting Person, as of the filing of Amendment No. 4, none of the executive officers or directors of the Reporting Person listed on Exhibit 99.3 have anything additional to disclose in response to this Item."</percentageOfClassSecurities>
+        <numberOfShares>Item 5(b) of the Original 13D is hereby amended and restated in its entirety as follows:
+
+"The response to Item 5(a) of Amendment No. 4 is incorporated herein by reference."</numberOfShares>
+        <transactionDesc>Item 5(c) of the Original 13D is hereby supplemented as follows: "Other than as described herein or on Exhibit 99.2 filed with Amendment No. 4, which is incorporated herein by reference, no transactions in the Common Stock were effected by the Reporting Person (or, to the knowledge of the Reporting Person, by any of the executive officers or directors of the Reporting Person listed on Exhibit 99.3) since the most recent filing on Schedule 13D by the Reporting Person."</transactionDesc>
+      </item5>
+      <item6>
+        <contractDescription>Item 6 to the Original 13D is hereby supplemented as follows:
+
+"Item 3 to Amendment No. 4 is hereby incorporated by reference.
+
+To the knowledge of the Reporting Person, as of the filing of this Amendment No. 4, none of the executive officers or directors of the Reporting Person listed on Exhibit 99.3 have anything additional to disclose in response to this Item."</contractDescription>
+      </item6>
+      <item7>
+        <filedExhibits>Item 7 of the Original 13D is hereby amended and restated in its entirety as follows:
+
+"Exhibit 99.1    Offer Letter, dated as of May 3, 2026.*
+Exhibit 99.2     Trading Data.
+Exhibit 99.3     Names of the Executive Officers and Directors of the Reporting Person.*
+Exhibit 99.4     Form of Put/Call Pair Supplemental Confirmation.*
+Exhibit 99.5     Form of Put/Call Pair Pricing Notification.*
+
+* Previously filed"</filedExhibits>
+      </item7>
+    </items1To7>
+    <signatureInfo>
+      <signaturePerson>
+        <signatureReportingPerson>GameStop Corp.</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Mark H. Robinson</signature>
+          <title>Mark H. Robinson/General Counsel</title>
+          <date>07/17/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+    </signatureInfo>
+  </formData>
+
+</edgarSubmission>

@@ -167,8 +167,11 @@ let stats_cmd =
     let+ e = env
     in
     run_job ~env_file:e (fun store _cfg ->
-        Lwt.bind (Store.stats store) (fun (chunks, docs) ->
-          Printf.printf "documents: %d\nchunks:    %d\n" docs chunks;
+        Lwt.bind (Store.stats store) (fun s ->
+          Printf.printf "documents:        %d\n" s.Store.docs;
+          Printf.printf "chunks:           %d\n" s.Store.chunks;
+          Printf.printf "ownership events: %d\n" s.Store.ownership_events;
+          Printf.printf "13F positions:    %d\n" s.Store.holdings;
           Lwt.return_unit))
   in
   Cmd.v (Cmd.info "stats" ~doc:"Show the current contents of the store.") term
