@@ -22,8 +22,7 @@ One row per text chunk of one filing. Written by the ingest pipeline
 | `section` | `TEXT NULL` | Heading path within the document |
 | `chunk_index` | `INT NOT NULL` | Position of the chunk within the document |
 | `text` | `TEXT NOT NULL` | Chunk text |
-| `embedding` | `vector(N) NOT NULL` | `N` = `EMBEDDING_DIM` (2560 in the reference schema); full precision, used for the exact rerank |
-| `embedding_hv` | `halfvec(N) GENERATED ALWAYS AS (embedding::halfvec) STORED` | Half-precision mirror of `embedding`, created for the HNSW index (below) |
+| `embedding` | `vector(N) NOT NULL` | `N` = `EMBEDDING_DIM` (2560 in the reference schema); full precision. It is stored once and drives both the exact rerank and the HNSW expression index (below) |
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |
 
 Constraints/indexes: `UNIQUE (doc_id, chunk_index)` (ingest
@@ -35,17 +34,25 @@ the other blanks, which a `btrim` (spaces-only) check would miss. The
 migration is corrective: it replaces an earlier space-only constraint and
 removes any whitespace-only rows the old one admitted, so it cannot fail on
 pre-existing data);
-`chunks_embedding_hnsw` on `embedding_hv`
-(`halfvec_cosine_ops`) — cosine HNSW over the half-precision mirror. pgvector's
-HNSW caps `vector` at 2000 dims but `halfvec` at 4000, so at the reference 2560
-dims only the mirror is indexable; the index is created when `N ≤ 4000`
-(`0004_halfvec_hnsw.sql` adds the mirror and index to existing databases)
-otherwise retrieval falls back to sequential scan. Search retrieves its
-candidates through this index (`ORDER BY embedding_hv <=> q`) and then reranks
-them with the full-precision `embedding` (ordering the candidates by that exact
-similarity), so the half-precision index never degrades result quality;
-B-tree indexes on `doc_id`, `(company, form)`, `(cik, filed_at DESC)`
-for metadata filters.
+`chunks_embedding_hnsw` on the EXPRESSION `(embedding::halfvec(N))`
+(`halfvec_cosine_ops`) — cosine HNSW over a half-precision cast of the
+embedding. It is an expression index, so the half-precision value is computed
+on the fly and no duplicate mirror column is stored. pgvector's HNSW caps
+`vector` at 2000 dims but `halfvec` at 4000, so at the reference 2560 dims the
+full-precision column is not indexable but its half-precision cast is; the
+index is created when `N ≤ 4000` (`0004_halfvec_hnsw.sql` converts existing
+databases — dropping a pre-existing `embedding_hv` mirror column and any
+non-expression index — to the expression index) otherwise retrieval falls back
+to sequential scan. Search retrieves its candidates through this index
+(`ORDER BY (embedding::halfvec(N)) <=> q`, with the inner `LIMIT` widened to
+`candidate_k ≈ min(50, 5·top_k)`), then reranks those candidates with the
+full-precision `embedding` (ordering them by that exact similarity) and
+truncates to `top_k`: the rerank is exact over the retrieved candidates, so the
+result is the true top-k of the candidate set, while the candidate set itself
+is approximate (half-precision HNSW) and a metadata-filtered search widens the
+scan breadth (`hnsw.iterative_scan=strict_order` plus a large `ef_search`) so a
+selective filter does not silently return too few; B-tree indexes on `doc_id`,
+`(company, form)`, `(cik, filed_at DESC)` for metadata filters.
 
 A self-contained benchmark (`benchmark/halfvec_hnsw.sql`, rolled back
 on exit) measures the two retrieval strategies at the reference 2560

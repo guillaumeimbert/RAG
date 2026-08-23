@@ -104,60 +104,45 @@ type hit = {
 }
 
 (** Vector search, two-stage. The inner query retrieves the candidate set
-    with the half-precision HNSW index ([ORDER BY embedding_hv <=> q::halfvec
-    LIMIT top_k]): pgvector's HNSW caps [vector] at 2000 dims but [halfvec] at
-    4000, so at 2560 dims only the halfvec mirror is indexable, and the index
-    makes candidate retrieval fast (an Index Scan instead of a sequential
-    scan). The inner query nonetheless computes the similarity from the
-    FULL-precision [embedding] column, and the outer query reorders the
-    candidates by that exact similarity and drops any whose cosine similarity
-    falls below [min_similarity], so a nonsense or unrelated query returns
-    NOTHING rather than the nearest top_k however bad they are.
+    with the half-precision HNSW expression index
+    ([ORDER BY (embedding::halfvec(dim)) <=> q::halfvec
+    LIMIT candidate_k]): pgvector's HNSW caps [vector] at 2000 dims but
+    [halfvec] at 4000, so at 2560 dims only a halfvec expression is
+    indexable. The ORDER BY expression must match the index EXACTLY (including
+    the dimension typmod) for the index to be used, so the dimension is
+    interpolated as a literal into the query. The index makes candidate
+    retrieval fast (an Index Scan instead of a sequential scan). The inner
+    query retrieves [candidate_k] (>= top_k) candidates, and nonetheless
+    computes the similarity from the FULL-precision [embedding] column; the
+    outer query reorders the candidates by that exact similarity (recovering
+    the true nearest neighbours that half-precision ordering displaced), caps
+    the result at [top_k], and drops any whose cosine similarity falls below
+    [min_similarity], so a nonsense or unrelated query returns NOTHING rather
+    than the nearest top_k however bad they are.
 
     [min_similarity] = 0.0 DISABLES the filter: cosine similarity ranges over
     [-1, 1], so a plain `similarity >= 0.0` would silently drop every
     negative-scoring (anti-parallel) hit. 0.0 is therefore special-cased so the
     default behaviour returns the nearest top_k regardless of sign. Any other
-    value (including negative ones) is applied as a literal floor. *)
-let search_q =
-  [%rapper
-    get_many
-    {sql|
-      SELECT
-        id::int AS @int{id},
-        doc_id AS @string{doc_id},
-        company AS @string{company},
-        cik AS @string{cik},
-        ticker AS @string{ticker},
-        form AS @string{form},
-        filed_at AS @string{filed_at},
-        section AS @string{section},
-        text AS @string{text},
-        similarity AS @float{similarity}
-      FROM (
-        SELECT
-          id,
-          doc_id,
-          company,
-          cik,
-          COALESCE(ticker, '') AS ticker,
-          form,
-          filed_at::text AS filed_at,
-          COALESCE(section, '') AS section,
-          text,
-          1 - (embedding <=> %string{q}::vector) AS similarity
-        FROM chunks
-        WHERE ('' = %string{cik} OR cik = %string{cik})
-          AND ('' = %string{form} OR form = %string{form})
-          AND ('' = %string{ticker} OR ticker = %string{ticker})
-        ORDER BY embedding_hv <=> %string{q}::halfvec
-        LIMIT %int{top_k}
-      ) ranked
-      WHERE (%float{min_similarity} = 0.0
-             OR ranked.similarity >= %float{min_similarity})
-      ORDER BY ranked.similarity DESC
-    |sql}
-    record_out syntax_off]
+    value (including negative ones) is applied as a literal floor.
+
+    A selective metadata filter (cik/form/ticker) is applied during/after the
+    approximate scan, so [search] also widens the HNSW search breadth for the
+    query ([hnsw.iterative_scan = strict_order] + a large [hnsw.ef_search]) so
+    the scan keeps going until enough candidates pass the filter, instead of
+    silently returning too few. *)
+(** Map a raw search row — a 10-tuple in column order ([id, doc_id, company,
+    cik, ticker, form, filed_at, section, text, similarity]) — to a [hit]. The
+    nesting matches the output type declared in [search]. *)
+let tuple_to_hit
+  (id,
+   (doc_id,
+    (company,
+     (cik,
+      (ticker,
+       (form, (filed_at, (section, (text, similarity))))))))) :
+  hit =
+  { id; doc_id; company; cik; ticker; form; filed_at; section; text; similarity }
 
 let exists_q =
   [%rapper
@@ -623,21 +608,66 @@ let upsert_chunks ?(force = false) t (doc_id : string) (rows : chunk_row list) :
 (** Vector search with optional metadata filters (empty/None = no filter). *)
 let search t ~query ~top_k ?(cik : string option = None) ?(form : string option = None) ?(ticker : string option = None) ?(min_similarity : float = 0.0) () :
     hit list Lwt.t =
-  Lwt.bind
-    ( Caqti_lwt_unix.Pool.use
-        (fun conn ->
-          search_q
-            ~q:query
-            ~cik:(Option.value ~default:"" cik)
-            ~form:(Option.value ~default:"" form)
-            ~ticker:(Option.value ~default:"" ticker)
-            ~min_similarity
-            ~top_k
-            conn)
-        t.pool )
-    (function
-      | Ok hits -> Lwt.return hits
-      | Error e -> Lwt.fail (Db (Caqti_error.show e)))
+  let dim = t.cfg.Config.embedding_dim in
+  let n = string_of_int dim in
+  (* Widen the ANN candidate set so the full-precision rerank (the outer
+     [ORDER BY similarity]) can recover the true nearest neighbours that
+     half-precision ordering displaced: at least 5, or 5x top_k, capped at 50. *)
+  let candidate_k = max 5 (min 50 (top_k * 5)) in
+  let ef_search = max candidate_k 100 in
+  let cik_s = Option.value ~default:"" cik in
+  let form_s = Option.value ~default:"" form in
+  let ticker_s = Option.value ~default:"" ticker in
+  (* Widen the HNSW search breadth for this transaction so a selective metadata
+     filter (applied during/after the approximate scan) does not silently return
+     too few rows: strict_order makes the scan keep iterating until enough
+     candidates pass the filter, and ef_search widens the initial window. Both
+     are transaction-local (is_local = true) so they do not leak onto the pooled
+     connection. *)
+  let guc_sql =
+    "SELECT set_config('hnsw.iterative_scan', 'strict_order', true), "
+    ^ "set_config('hnsw.ef_search', '" ^ string_of_int ef_search ^ "', true)"
+  in
+  let guc_q =
+    let open Caqti_type.Std in
+    Caqti_request.Infix.( ( ->! ) unit (t2 string string) guc_sql )
+  in
+  let sql =
+    "SELECT id::int AS id, doc_id, company, cik, "
+    ^ "COALESCE(ticker, '') AS ticker, form, filed_at::text AS filed_at, "
+    ^ "COALESCE(section, '') AS section, text, similarity "
+    ^ "FROM (SELECT id, doc_id, company, cik, ticker, form, filed_at, section, "
+    ^ "text, 1 - (embedding <=> $1::vector) AS similarity FROM chunks "
+    ^ "WHERE ('' = $2 OR cik = $2) AND ('' = $3 OR form = $3) "
+    ^ "AND ('' = $4 OR ticker = $4) "
+    ^ "ORDER BY (embedding::halfvec(" ^ n ^ ")) <=> $1::halfvec(" ^ n ^ ") "
+    ^ "LIMIT $5) ranked "
+    ^ "WHERE $6 = 0.0 OR similarity >= $6 "
+    ^ "ORDER BY similarity DESC LIMIT $7"
+  in
+  let search_q =
+    let open Caqti_type.Std in
+    Caqti_request.Infix.
+      ( ( ->* )
+          (t2 string
+             (t2 string
+                (t2 string (t2 string (t2 int (t2 float int))))))
+          (t2 int (t2 string (t2 string (t2 string (t2 string (t2 string
+            (t2 string (t2 string (t2 string float)))))))))
+          sql )
+  in
+  with_tx t (fun (conn : Caqti_lwt.connection) ->
+    let module Db = (val conn : Caqti_lwt.CONNECTION) in
+    Lwt.bind (Db.find guc_q ()) (function
+      | Ok _ ->
+        Lwt.map
+          (function
+            | Ok rows -> Ok (List.map tuple_to_hit rows)
+            | Error e -> Error e)
+          (Db.collect_list search_q
+             (query, (cik_s, (form_s, (ticker_s, (candidate_k, (min_similarity,
+                                                         top_k)))))))
+      | Error e -> Lwt.return (Error e)))
 
 let doc_exists t (doc_id : string) : bool Lwt.t =
   Lwt.bind

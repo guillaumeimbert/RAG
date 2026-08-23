@@ -82,13 +82,14 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
 - **similarity threshold** (`MIN_SIMILARITY`): an unrelated query above
   the floor returns **no** results (the path `ask` takes to avoid feeding
   the LLM irrelevant material), while a relevant query still passes,
-- **half-precision vector index**: the `chunks` table stores a halfvec
-  `embedding_hv` mirror of the full-precision `embedding`, and the HNSW
-  index is built on the mirror (pgvector caps `vector` HNSW at 2000 dims but
-  `halfvec` at 4000, so the reference 2560 is indexable); the test confirms
-  the mirror column and index exist, that candidate retrieval is an Index
-  Scan on the mirror, and that `0004_halfvec_hnsw.sql` adds the mirror +
-  index to an old-style database,
+- **half-precision vector index**: the `chunks` table stores the full-precision
+  `embedding` once and indexes its half-precision EXPRESSION
+  `embedding::halfvec(N)` (no duplicate mirror column; pgvector caps `vector`
+  HNSW at 2000 dims but `halfvec` at 4000, so the reference 2560 is
+  indexable); the test confirms there is no generated mirror column, that the
+  HNSW index is the halfvec expression, that candidate retrieval is an Index
+  Scan, and that `0004_halfvec_hnsw.sql` converts an old-style database
+  (generated mirror column) to the expression index,
 - **structured retrieval** (latest-event-per-filer selection,
   previous-event deltas, multiple filers, amendment flag),
 - **chunk quality / data integrity** (every stored chunk is nonempty,

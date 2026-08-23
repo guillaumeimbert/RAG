@@ -55,13 +55,26 @@ podman compose exec -T db psql -U raguesslighter -d raguesslighter \
 `[^[:space:]]` regex, so the command above converges on the right
 constraint either way.)
 
-`0004_halfvec_hnsw.sql` likewise converges: it adds the half-precision
-`embedding_hv` mirror (if absent) and (re)creates the HNSW index on it,
-so an existing store gains the halfvec index without a re-ingest:
+`0004_halfvec_hnsw.sql` likewise converges: it converts the store to the
+halfvec HNSW expression index — dropping a pre-existing `embedding_hv`
+mirror column and any non-expression index, then (re)creating the index on the
+`embedding::halfvec(N)` cast — so an existing store gains the halfvec index
+without a re-ingest:
 
 ```sh
 podman compose exec -T db psql -U raguesslighter -d raguesslighter \
   < schema/0004_halfvec_hnsw.sql
+```
+
+When the index is (re)built on a large store, pgvector builds the HNSW graph
+in shared memory; if the graph exceeds `maintenance_work_mem` it warns
+`hnsw graph no longer fits into maintenance_work_mem` and produces a
+lower-quality (still functional) index. The `db` service sets `shm_size: 1g`
+for this reason; for a very large store, rebuild with a larger budget:
+
+```sh
+podman compose exec -T db psql -U raguesslighter -d raguesslighter \
+  -c "SET maintenance_work_mem = '1GB'; REINDEX INDEX chunks_embedding_hnsw;"
 ```
 
 ## Reset the store
@@ -93,15 +106,15 @@ This cannot be done with `ALTER` in place. Steps:
 1. Stop ingesting.
 2. Update `EMBEDDING_DIM` (and `EMBEDDING_MODEL`) in `.env`.
 3. Update the `vector(N)` and `halfvec(N)` literals in
-   `schema/0001_init.sql` and the `halfvec(N)` literal in
-   `schema/0004_halfvec_hnsw.sql` to match.
+   `schema/0001_init.sql` to match (`0004_halfvec_hnsw.sql` reads the
+   dimension from the column, so it carries no literal).
 4. Reset the store (above) so the `chunks` columns are recreated at the
    new dimension.
 5. Re-ingest.
 
 Note: pgvector's HNSW caps the full-precision `vector` type at 2000
-dims, but the schema indexes the half-precision `embedding_hv` mirror
-instead, whose HNSW cap is 4000 dims — so the reference 2560 (and any
-width up to 4000) gets a real HNSW index. Only above 4000 does retrieval
-fall back to a sequential scan (correct, just slower; fine at typical
-store sizes).
+dims, but the schema indexes the half-precision EXPRESSION
+`embedding::halfvec(N)` instead, whose HNSW cap is 4000 dims — so the
+reference 2560 (and any width up to 4000) gets a real HNSW index. Only
+above 4000 does retrieval fall back to a sequential scan (correct, just
+slower; fine at typical store sizes).

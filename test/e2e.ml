@@ -270,6 +270,12 @@ let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
     xml (fixture "13f_nvda_primary.xml")
   | "/Archives/edgar/data/1045810/000104581026000094/badtable.xml" ->
     xml (fixture "13f_bad_table.xml")
+  (* empty 13F information table (7n): a valid cover plus an information
+     table downloaded as HTTP-200 with an EMPTY body (a 200 truncation) ->
+     Failed, not a benign skip. Only a 404 (no table) is benign. *)
+  | "/Archives/edgar/data/1045810/000104581026000098/primary_doc.xml" ->
+    xml (fixture "13f_nvda_primary.xml")
+  | "/Archives/edgar/data/1045810/000104581026000098/emptitable.xml" -> xml ""
   | "/submissions/CIK0001045810.json" ->
     Some { Mock.code = 200; content_type = "application/json"; body = fixture "nvda_submissions.json" }
   | "/files/company_tickers.json" ->
@@ -476,9 +482,58 @@ let () =
       check "search: similarities in range"
         (List.for_all (fun h -> h.Store.similarity <= 1.0) hits);
 
+      (* 4a. recall: widening the inner LIMIT to candidate_k (then reranking the
+         candidates with the full-precision embedding) must not lose the true
+         top results. The indexed search's best hit (full-precision similarity)
+         must be at least as good as the exact sequential search's 5th-best
+         hit — i.e. the widened candidate set keeps the top-k that a naive
+         inner `LIMIT top_k` would have. *)
+      let exact_sim_at (i : int) : float =
+        (match
+           pg_query scratch_db
+             (Printf.sprintf
+                "SELECT (1 - (embedding <=> '%s'::vector))::float8 FROM chunks ORDER BY embedding <=> '%s'::vector ASC LIMIT 1 OFFSET %d"
+                query
+                query
+                i)
+         with
+         | [ [s] ] -> float_of_string s
+         | _ -> 0.0)
+      in
+      let exact_5th = exact_sim_at 4 in
+      let indexed_best =
+        (match hits with [] -> 0.0 | h :: _ -> h.Store.similarity)
+      in
+      check "search: recall — indexed best hit beats the exact 5th (top-k kept)"
+        (indexed_best >= exact_5th -. 1e-6);
+
+      let n_8k =
+        (match pg_query scratch_db "SELECT count(*)::int FROM chunks WHERE form = '8-K'" with
+         | [ [s] ] -> int_of_string s
+         | _ -> 0)
+      in
+      check "search: 8-K distractors present (non-vacuous filter test)" (n_8k > 0);
       let hk = Lwt_main.run (Store.search store ~query ~top_k:5 ~form:(Some "8-K") ()) in
+      check "search: form filter returns every 8-K chunk (capped at top_k)"
+        (List.length hk = min 5 n_8k);
       check "search: form filter honoured"
         (List.for_all (fun (h : Store.hit) -> h.Store.form = "8-K") hk);
+
+      (* 4a'. selective vs. broad filters both return the correct count (not
+         silently too few). Store.search widens the HNSW search breadth
+         (iterative_scan=strict_order + a large ef_search) so a selective
+         filter — applied during/after the approximate scan — does not drop
+         valid candidates. The 8-K form is the selective case (few matching
+         chunks); the 10-K form is the broad case. *)
+      let n_10k =
+        (match pg_query scratch_db "SELECT count(*)::int FROM chunks WHERE form = '10-K'" with
+         | [ [s] ] -> int_of_string s
+         | _ -> 0)
+      in
+      let h10k = Lwt_main.run (Store.search store ~query ~top_k:50 ~form:(Some "10-K") ()) in
+      check "search: broad 10-K filter returns the correct count (all 10-K)"
+        (n_10k > 0 && List.length h10k = min 50 n_10k
+         && List.for_all (fun (h : Store.hit) -> h.Store.form = "10-K") h10k);
 
       (* 4b. structured ownership retrieval (SQL path) *)
       let holders = Lwt_main.run (Store.holders_of store ~subject_cik:"0001513845" ~limit:10) in
@@ -638,13 +693,16 @@ let () =
            && b.Store.is_amendment
          | _ -> false);
 
-      (* 4f. halfvec HNSW index: at 2560 dims pgvector's HNSW cannot index the
-         full-precision vector column (2000-dim cap), so the schema keeps that
-         column for exact reranking AND adds a half-precision mirror
-         [embedding_hv] which carries the HNSW index. Verify (a) the mirror +
-         index exist, (b) candidate retrieval uses the index (Index Scan when
-         seqscan is disabled), and (c) the 0004 migration back-fills both onto
-         an old-style database that lacks the mirror. *)
+      (* 4f. halfvec HNSW expression index: at 2560 dims pgvector's HNSW
+         cannot index the full-precision vector column (2000-dim cap), so the
+         schema keeps that column for exact reranking and indexes the
+         half-precision cast (embedding::halfvec(dim)) with an EXPRESSION HNSW
+         index (no duplicate column — the cast is stored once). Verify
+         (a) no generated mirror column exists, (b) the index is the halfvec
+         expression with cosine ops, (c) candidate retrieval uses the index
+         (Index Scan when seqscan is disabled), and (d) the 0004 migration
+         converts an old-style database (generated mirror column) to the
+         expression index. *)
       let in_str (s : string) (sub : string) : bool =
         let n = String.length sub in
         if n = 0 then true
@@ -658,53 +716,54 @@ let () =
       let is_one (rows : string list list) : bool =
         (match rows with [ ["1"] ] -> true | _ -> false)
       in
-      check "halfvec: embedding_hv generated column present"
-        (is_one (pg_query scratch_db
-             "SELECT count(*)::int FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding_hv'"));
-      let idx_def =
-        (match pg_query scratch_db "SELECT indexdef FROM pg_indexes WHERE indexname = 'chunks_embedding_hnsw'" with
+      let hv_col_present db =
+        is_one (pg_query db
+           "SELECT count(*)::int FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding_hv'")
+      in
+      let idx_of db =
+        (match pg_query db "SELECT indexdef FROM pg_indexes WHERE indexname = 'chunks_embedding_hnsw'" with
          | [ [d] ] -> d
          | _ -> "")
       in
-      check "halfvec: HNSW index targets the halfvec mirror (cosine ops)"
-        (in_str idx_def "hnsw" && in_str idx_def "embedding_hv" && in_str idx_def "halfvec_cosine_ops");
+      check "halfvec: no generated mirror column (expression index instead)"
+        (not (hv_col_present scratch_db));
+      let idx_def = idx_of scratch_db in
+      check "halfvec: HNSW expression index on the halfvec cast (cosine ops)"
+        (in_str idx_def "hnsw" && in_str idx_def "::halfvec" && in_str idx_def "halfvec_cosine_ops");
       let qhv = "[" ^ (String.concat "," (List.init embed_dim (fun _ -> "0"))) ^ "]" in
+      let expr = Printf.sprintf "(embedding::halfvec(%d))" embed_dim in
       let plan =
         String.concat " "
           (List.concat
              (pg_query scratch_db
                 (Printf.sprintf
-                   "SET enable_seqscan = off; EXPLAIN (COSTS OFF) SELECT id FROM chunks ORDER BY embedding_hv <=> '%s'::halfvec LIMIT 5"
-                   qhv)))
+                   "SET enable_seqscan = off; EXPLAIN (COSTS OFF) SELECT id FROM chunks ORDER BY %s <=> '%s'::halfvec LIMIT 5"
+                   expr qhv)))
       in
       check "halfvec: candidate retrieval uses the HNSW index (Index Scan)"
         (in_str plan "Index Scan" && in_str plan "chunks_embedding_hnsw");
-      (* 0004 migration: an old-style database (embedding column, no mirror)
-         gains the mirror + index when 0004 is applied. *)
+      (* 0004 migration: an old-style database (full-precision column +
+         generated halfvec mirror) is converted to the expression index: the
+         mirror is dropped and the index rebuilt on the cast. *)
       let hv_db = "raguesslighter_e2e_hv" in
       let old_chunks_ddl =
         Printf.sprintf
-          "CREATE TABLE chunks (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, doc_id TEXT NOT NULL, company TEXT NOT NULL, cik TEXT NOT NULL, ticker TEXT, form TEXT NOT NULL, filed_at DATE NOT NULL, section TEXT, chunk_index INT NOT NULL, text TEXT NOT NULL, embedding vector(%d) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (doc_id, chunk_index))"
+          "CREATE TABLE chunks (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, doc_id TEXT NOT NULL, company TEXT NOT NULL, cik TEXT NOT NULL, ticker TEXT, form TEXT NOT NULL, filed_at DATE NOT NULL, section TEXT, chunk_index INT NOT NULL, text TEXT NOT NULL, embedding vector(%d) NOT NULL, embedding_hv halfvec(%d) GENERATED ALWAYS AS (embedding::halfvec) STORED, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (doc_id, chunk_index))"
+          embed_dim
           embed_dim
       in
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ hv_db ^ ";");
       pg_exec pg_main_db ("CREATE DATABASE " ^ hv_db ^ ";");
       pg_exec hv_db "CREATE EXTENSION IF NOT EXISTS vector;";
       pg_exec hv_db old_chunks_ddl;
-      check "halfvec: old-style DB lacks the mirror before 0004"
-        (not (is_one (pg_query hv_db
-             "SELECT count(*)::int FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding_hv'")));
+      check "halfvec: old-style DB has the generated mirror before 0004"
+        (hv_col_present hv_db);
       pg_exec hv_db (Test_fixtures.read_text (Test_fixtures.schema_file "0004_halfvec_hnsw.sql"));
-      check "halfvec: 0004 adds the mirror to an old-style DB"
-        (is_one (pg_query hv_db
-             "SELECT count(*)::int FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding_hv'"));
-      let hv_idx =
-        (match pg_query hv_db "SELECT indexdef FROM pg_indexes WHERE indexname = 'chunks_embedding_hnsw'" with
-         | [ [d] ] -> d
-         | _ -> "")
-      in
-      check "halfvec: 0004 creates the HNSW index on the mirror"
-        (in_str hv_idx "hnsw" && in_str hv_idx "embedding_hv");
+      check "halfvec: 0004 drops the generated mirror"
+        (not (hv_col_present hv_db));
+      let hv_idx = idx_of hv_db in
+      check "halfvec: 0004 creates the halfvec expression index"
+        (in_str hv_idx "hnsw" && in_str hv_idx "::halfvec" && in_str hv_idx "halfvec_cosine_ops");
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ hv_db ^ ";");
 
       (* 5. ticker resolution *)
@@ -1024,6 +1083,33 @@ let () =
         (match rbad with Pipeline.Failed _ -> true | _ -> false);
       check "malformed 13F table: no holdings stored"
         (count_where "holdings" "0001045810-26-000094" = 0);
+
+      (* 7n. empty 13F information table (HTTP-200, empty body): a table that
+         is actually downloaded (a 200 truncation yields an empty body) must
+         be Failed, not a benign "empty holdings" skip. The only benign
+         "no positions" case is a 404 (no table at all). This guards the
+         regression where an empty 200 body was silently treated as a skip. *)
+      let emptytable_index =
+        {
+          Edgar.accession = "0001045810-26-000098";
+          cik = "1045810";
+          company = "NVIDIA CORP";
+          form = "13F-HR";
+          filed_at = Date.of_string "2026-09-02";
+          report_date = None;
+          primary_document = "primary_doc.xml";
+          primary_description = "";
+          info_table_document = Some "emptitable.xml";
+          index_url =
+            edgar_base ^ "/Archives/edgar/data/1045810/0001045810-26-000098-index.htm";
+          ticker = "NVDA";
+        }
+      in
+      let rempty = Lwt_main.run (Pipeline.ingest_job_safe store (Pipeline.make_job emptytable_index)) in
+      check "empty 13F table (HTTP-200): classified as Failed"
+        (match rempty with Pipeline.Failed _ -> true | _ -> false);
+      check "empty 13F table (HTTP-200): no holdings stored"
+        (count_where "holdings" "0001045810-26-000098" = 0);
 
       (* 8. chunk quality / data integrity: every stored chunk is nonempty,
          within the chunker's size limit, and free of internal section markers

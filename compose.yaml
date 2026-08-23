@@ -20,6 +20,11 @@ services:
       POSTGRES_PASSWORD: raguesslighter
     ports:
       - "5432:5432"
+    # The halfvec HNSW index (see schema/0004_halfvec_hnsw.sql) builds its
+    # graph in shared memory; the reference 2560-dim width needs more than
+    # the 64 MB podman default or pgvector warns that the graph no longer
+    # fits maintenance_work_mem (a lower-quality, still-functional index).
+    shm_size: 1g
     volumes:
       - raguesslighter_pgdata:/var/lib/postgresql/data
       - ./schema:/docker-entrypoint-initdb.d:ro,z  # :z = SELinux relabel (required under $HOME on Fedora)

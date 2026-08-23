@@ -235,22 +235,24 @@ let ingest_13f ?force (store : Store.t) (job : job) : job_result Lwt.t =
     Lwt.bind (Edgar.get_document cfg (Edgar.primary_xml_url index)) (fun cover_xml ->
       Lwt.bind table_opt (fun table ->
         let t13f = Ownership.parse_13f cover_xml ~meta ~form:index.form table in
-        (* A 404 information table ([table = None]) is the documented
-           "no positions" case: the cover is recorded with zero holdings.
-           A table that was actually downloaded but yields zero positions
-           is truncated or schema-invalid, and treating it as empty would
-           hide a broken filing, so fail loudly (a re-run retries once the
-           upstream is fixed). An empty or whitespace-only body counts as
-           "no table". A genuinely empty holdings list is impossible in
-           practice: a 13F is filed to disclose at least one holding. *)
+        (* A 404 information table ([table = None]) is the ONLY benign "no
+           positions" case: the cover is recorded with zero holdings. Any
+           table that was actually downloaded (even an empty or
+           whitespace-only body, which a 200 truncation can produce) but
+           yields zero positions is truncated or schema-invalid; treating it
+           as empty would hide a broken filing, so fail loudly (a re-run
+           retries once the upstream is fixed). A genuinely empty holdings
+           list is impossible in practice: a 13F is filed to disclose at
+           least one holding. *)
         (match table with
          | None -> ()
-         | Some t ->
-           if String.trim t = "" || List.length t13f.positions > 0 then ()
+         | Some _ ->
+           if List.length t13f.positions > 0
+           then ()
            else
              failwith
                (Printf.sprintf
-                  "13F %s: information table downloaded but parsed to zero positions (truncated or schema-invalid)"
+                  "13F %s: information table downloaded but parsed to zero positions (truncated, schema-invalid, or empty)"
                   index.accession));
         let resolve (name : string) : string Lwt.t =
           if name = ""
