@@ -46,8 +46,13 @@ Four stages, each with a single responsibility:
 
 `lib/pipeline.ml` is the orchestrator: given a filing, it routes it
 by form to the prose path or an ownership parser, embeds, upserts,
-and reports stats. Per-filing failures are caught and skipped, so one
-malformed filing never aborts a day's ingest.
+and reports stats. All external I/O (fetch, parse, embed) happens
+*before* the store is written, and a filing's writes go out in a single
+Postgres transaction — so a filing is either fully ingested or leaves
+nothing behind. Per-filing failures never abort a day's ingest:
+a fetch/parse error skips the filing (retried on the next run), while
+an embedding or database failure is counted in `failed` and makes the
+command exit non-zero, again safe to simply re-run.
 
 ## Why two retrieval paths
 

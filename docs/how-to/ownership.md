@@ -26,7 +26,7 @@ sections:
 Ownership of NBIS (CIK 0001513845), from ingested 13G/13D/13F filings:
 
   13G/13D significant holders (latest event per filer):
-  NVIDIA Corporation (13G, event 2026-07-13, filed, passive): 9.30% of Class A Ordinary Shares — 22256412 shares
+  NVIDIA Corporation (13G, event 2026-07-13, filed 2026-07-20, passive): 9.30% of Class A Ordinary Shares — 22256412 shares
   13F institutional positions (latest report per filer):
   NVIDIA CORP (period 2026-06-30): $328773757, 1190476 shares (SHS CLASS A)
 ```
@@ -34,7 +34,7 @@ Ownership of NBIS (CIK 0001513845), from ingested 13G/13D/13F filings:
 Reading the lines:
 
 - **13G/13D section** — one row per holder (filer), showing the
-  *latest* event for that holder: form, event date, `passive` (13G)
+  *latest* event for that holder: form, event date, filing date, `passive` (13G)
   or active (13D), the percent of the class and the share count. When
   the holder has an earlier event on file (e.g. the latest event is an
   amendment), the previous event's figures are shown in parentheses:

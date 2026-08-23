@@ -108,7 +108,7 @@ takes a few minutes; on a cloud API longer still. Do not interrupt it.
 When it finishes you will see one summary line, like:
 
 ```
-NVDA (CIK 0001045810)  docs=90 chunks=4767 events=3 positions=63 skipped=0
+NVDA (CIK 0001045810)  docs=90 chunks=4767 events=3 positions=63 skipped=0 failed=0
 ```
 
 The numbers depend on how many filings the company has and on when
@@ -213,7 +213,7 @@ dune exec bin/query.exe -- holders --subject NBIS
 Ownership of NBIS (CIK 0001513845), from ingested 13G/13D/13F filings:
 
   13G/13D significant holders (latest event per filer):
-  NVIDIA Corporation (13G, event 2026-07-13, filed, passive): 9.30% of Class A Ordinary Shares — 22256412 shares
+  NVIDIA Corporation (13G, event 2026-07-13, filed 2026-07-20, passive): 9.30% of Class A Ordinary Shares — 22256412 shares
   13F institutional positions (latest report per filer):
   NVIDIA CORP (period 2026-06-30): $328773757, 1190476 shares (SHS CLASS A)
 ```

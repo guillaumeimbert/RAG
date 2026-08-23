@@ -40,6 +40,19 @@ let parse_date s =
 (* day                                                                  *)
 (* ------------------------------------------------------------------ *)
 
+(** Non-zero exit when some filings failed (embedding/DB): the run did
+    not complete cleanly even though no partial state was left behind
+    (writes are transactional) — a re-run retries the failed filings. *)
+let finish (s : Pipeline.stats) : unit Lwt.t =
+  if s.Pipeline.failed > 0
+  then
+    Lwt.fail
+      (Edgar.Failure
+         (Printf.sprintf
+            "failed=%d — run did not complete cleanly (nothing partial was stored); re-run to retry the failed filings"
+            s.Pipeline.failed))
+  else Lwt.return_unit
+
 let day_cmd =
   let date =
     Arg.required
@@ -56,7 +69,7 @@ let day_cmd =
         let d = parse_date d in
         Lwt.bind (Pipeline.ingest_day store d) (fun s ->
           Printf.printf "%s  %s\n" (Date.to_string d) (Pipeline.show_stats s);
-          Lwt.return_unit))
+          finish s))
   in
   Cmd.v (Cmd.info "day" ~doc:"Ingest all matching filings for one business day.") term
 
@@ -87,7 +100,7 @@ let backfill_cmd =
         | Some f, Some t ->
           Lwt.bind (Pipeline.ingest_range store (parse_date f) (parse_date t)) (fun s ->
             Printf.printf "total  %s\n" (Pipeline.show_stats s);
-            Lwt.return_unit)
+            finish s)
         | _ -> raise (Edgar.Failure "backfill requires both --from and --to"))
   in
   Cmd.v
@@ -121,7 +134,7 @@ let cik_cmd =
         let limit = if l > 0 then Some l else None in
         Lwt.bind (Pipeline.ingest_cik ?limit store c) (fun s ->
           Printf.printf "CIK %s  %s\n" c (Pipeline.show_stats s);
-          Lwt.return_unit))
+          finish s))
   in
   Cmd.v (Cmd.info "cik" ~doc:"Ingest the recent filings of one company (by CIK).") term
 
@@ -151,7 +164,7 @@ let ticker_cmd =
           | Some cik ->
             Lwt.bind (Pipeline.ingest_cik ?limit store cik) (fun s ->
               Printf.printf "%s (CIK %s)  %s\n" t cik (Pipeline.show_stats s);
-              Lwt.return_unit)))
+              finish s)))
   in
   Cmd.v (Cmd.info "ticker" ~doc:"Ingest the recent filings of one company (by ticker).")
     term

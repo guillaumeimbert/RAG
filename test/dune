@@ -12,7 +12,3 @@
   threads
   unix
   yojson))
-
-(executables
- (names scratch_ownership_probe)
- (libraries lwt lwt.unix raguesslighter re))

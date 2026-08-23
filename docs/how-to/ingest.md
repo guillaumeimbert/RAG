@@ -26,8 +26,11 @@ ingest.exe ticker NVDA --limit 20
 ```
 
 The command prints a summary line (`docs=… chunks=… events=…
-positions=… skipped=…`). `skipped` counts filings already in the
-store — re-running the same command is safe and changes nothing.
+positions=… skipped=… failed=…`). `skipped` counts filings already in
+the store — re-running the same command is safe and changes nothing.
+`failed` counts filings whose embedding or database write failed; the
+run exits non-zero when it is non-zero (nothing partial was stored —
+writes are transactional — so a re-run retries those filings).
 
 ## Ingest one business day
 

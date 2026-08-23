@@ -475,37 +475,6 @@ let staked_q =
     |sql}
     record_out syntax_off]
 
-(** The positions [filer] reported in its latest 13F (its portfolio). *)
-type portfolio_entry = {
-  issuer_name : string;
-  class_name : string;
-  value_usd : float;
-  shares : float;
-  discretion : string;
-  accession : string;
-}
-
-let portfolio_q =
-  [%rapper
-    get_many
-    {sql|
-      WITH lp AS (
-        SELECT max(period) AS p FROM holdings WHERE filer_cik = %string{filer_cik}
-      )
-      SELECT
-        h.issuer_name AS @string{issuer_name},
-        COALESCE(h.class, '') AS @string{class_name},
-        COALESCE(h.value_usd::float8, -1) AS @float{value_usd},
-        COALESCE(h.shares::float8, -1) AS @float{shares},
-        COALESCE(h.discretion, '') AS @string{discretion},
-        h.accession AS @string{accession}
-      FROM holdings h
-      WHERE h.filer_cik = %string{filer_cik} AND h.period = lp.p
-      ORDER BY COALESCE(h.value_usd, -1) DESC NULLS LAST
-      LIMIT %int{limit}
-    |sql}
-    record_out syntax_off]
-
 (* ------------------------------------------------------------------ *)
 (* Store                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -520,26 +489,52 @@ let create (cfg : Config.t) : t Lwt.t =
 
 let close t : unit Lwt.t = close_pool t.pool
 
-let upsert_chunks t (rows : chunk_row list) : unit Lwt.t =
-  let rec split acc l =
-    if List.length l <= upsert_batch then List.rev (l :: acc)
+(** Run [f conn] on one pooled connection wrapped in a single transaction:
+    committed when [f] returns [Ok _], rolled back when [f] returns
+    [Error _] or raises. Every write [f] performs is atomic with every
+    other — either all of them are stored, or none of them are, so an
+    interrupted job never leaves a filing half-persisted. *)
+let with_tx t (f : (Caqti_lwt.connection -> ('a, Caqti_error.t) result Lwt.t)) : 'a Lwt.t =
+  Lwt.catch
+    (fun () ->
+      Lwt.bind
+        ( Caqti_lwt_unix.Pool.use
+            (fun conn ->
+              let module C = (val conn : Caqti_lwt.CONNECTION) in
+              C.with_transaction (fun () -> f conn))
+            t.pool )
+        (function
+          | Ok a -> Lwt.return a
+          | Error e -> Lwt.fail (Db (Caqti_error.show e))))
+    (function
+      | Db s -> Lwt.fail (Db s)
+      | e -> Lwt.fail (Db (Printexc.to_string e)))
+
+(** Split [rows] into batches of at most [n]. *)
+let split_rows n rows =
+  let rec go acc l =
+    if List.length l <= n then List.rev (l :: acc)
     else
-      let (h, tl) = (List.take upsert_batch l, List.drop upsert_batch l) in
-      split (h :: acc) tl
+      let (h, tl) = (List.take n l, List.drop n l) in
+      go (h :: acc) tl
   in
-  match split [] rows with
-  | [] -> Lwt.return_unit
-  | batches ->
-    Lwt_list.iter_s
-      (fun batch ->
-        Lwt.bind
-          ( Caqti_lwt_unix.Pool.use
-              (fun conn -> upsert_many_q ~rows:(rows_json batch) conn)
-              t.pool )
-          (function
-            | Ok () -> Lwt.return_unit
-            | Error e -> Lwt.fail (Db (Caqti_error.show e))))
-      batches
+  go [] rows
+
+(** [upsert_chunks] on an existing connection: one round trip per batch,
+    returning a [result] so it can compose inside [with_transaction]. *)
+let upsert_chunks_on (conn : Caqti_lwt.connection) (rows : chunk_row list) :
+    (unit, Caqti_error.t) result Lwt.t =
+  let rec go = function
+    | [] -> Lwt.return (Ok ())
+    | batch :: rest ->
+      Lwt.bind (upsert_many_q ~rows:(rows_json batch) conn) (function
+        | Ok () -> go rest
+        | Error _ as r -> Lwt.return r)
+  in
+  go (split_rows upsert_batch rows)
+
+let upsert_chunks t (rows : chunk_row list) : unit Lwt.t =
+  with_tx t (fun conn -> upsert_chunks_on conn rows)
 
 (** Vector search with optional metadata filters (empty/None = no filter). *)
 let search t ~query ~top_k ?(cik : string option = None) ?(form : string option = None) ?(ticker : string option = None) () :
@@ -577,48 +572,42 @@ let filing_exists t (doc_id : string) : bool Lwt.t =
 
 (** Bulk upsert of ownership_events rows (13G/13D), same batching as
     [upsert_chunks]. *)
-let upsert_own_events t (rows : own_event_row list) : unit Lwt.t =
-  let rec split acc l =
-    if List.length l <= upsert_batch then List.rev (l :: acc)
-    else
-      let (h, tl) = (List.take upsert_batch l, List.drop upsert_batch l) in
-      split (h :: acc) tl
+let upsert_own_events_on (conn : Caqti_lwt.connection) (rows : own_event_row list) :
+    (unit, Caqti_error.t) result Lwt.t =
+  let rec go = function
+    | [] -> Lwt.return (Ok ())
+    | batch :: rest ->
+      Lwt.bind (upsert_own_events_q ~rows:(own_events_json batch) conn) (function
+        | Ok () -> go rest
+        | Error _ as r -> Lwt.return r)
   in
-  match split [] rows with
-  | [] -> Lwt.return_unit
-  | batches ->
-    Lwt_list.iter_s
-      (fun batch ->
-        Lwt.bind
-          ( Caqti_lwt_unix.Pool.use
-              (fun conn -> upsert_own_events_q ~rows:(own_events_json batch) conn)
-              t.pool )
-          (function
-            | Ok () -> Lwt.return_unit
-            | Error e -> Lwt.fail (Db (Caqti_error.show e))))
-      batches
+  go (split_rows upsert_batch rows)
+
+let upsert_own_events t (rows : own_event_row list) : unit Lwt.t =
+  with_tx t (fun conn -> upsert_own_events_on conn rows)
+
+(** Store the ownership events AND the narrative chunks of one 13G/13D
+    filing in a single transaction: both are stored, or neither is. *)
+let upsert_13gd t (events : own_event_row list) (chunks : chunk_row list) : unit Lwt.t =
+  with_tx t (fun conn ->
+    Lwt.bind (upsert_own_events_on conn events) (function
+      | Ok () -> upsert_chunks_on conn chunks
+      | Error _ as r -> Lwt.return r))
 
 (** Bulk upsert of holdings rows (13F positions). *)
-let upsert_holdings t (rows : holding_row list) : unit Lwt.t =
-  let rec split acc l =
-    if List.length l <= upsert_batch then List.rev (l :: acc)
-    else
-      let (h, tl) = (List.take upsert_batch l, List.drop upsert_batch l) in
-      split (h :: acc) tl
+let upsert_holdings_on (conn : Caqti_lwt.connection) (rows : holding_row list) :
+    (unit, Caqti_error.t) result Lwt.t =
+  let rec go = function
+    | [] -> Lwt.return (Ok ())
+    | batch :: rest ->
+      Lwt.bind (upsert_holdings_q ~rows:(holdings_json batch) conn) (function
+        | Ok () -> go rest
+        | Error _ as r -> Lwt.return r)
   in
-  match split [] rows with
-  | [] -> Lwt.return_unit
-  | batches ->
-    Lwt_list.iter_s
-      (fun batch ->
-        Lwt.bind
-          ( Caqti_lwt_unix.Pool.use
-              (fun conn -> upsert_holdings_q ~rows:(holdings_json batch) conn)
-              t.pool )
-          (function
-            | Ok () -> Lwt.return_unit
-            | Error e -> Lwt.fail (Db (Caqti_error.show e))))
-      batches
+  go (split_rows upsert_batch rows)
+
+let upsert_holdings t (rows : holding_row list) : unit Lwt.t =
+  with_tx t (fun conn -> upsert_holdings_on conn rows)
 
 (* ------------------------------------------------------------------ *)
 (* Structured retrieval                                                *)
@@ -647,14 +636,6 @@ let positions_of t ~issuer_cik ~issuer_name ~limit : position list Lwt.t =
 let staked_of t ~filer_cik ~limit : stake list Lwt.t =
   Lwt.bind
     (Caqti_lwt_unix.Pool.use (fun conn -> staked_q ~filer_cik ~limit conn) t.pool)
-    (function
-      | Ok r -> Lwt.return r
-      | Error e -> Lwt.fail (Db (Caqti_error.show e)))
-
-(** Positions of [filer_cik]'s latest 13F. *)
-let portfolio_of t ~filer_cik ~limit : portfolio_entry list Lwt.t =
-  Lwt.bind
-    (Caqti_lwt_unix.Pool.use (fun conn -> portfolio_q ~filer_cik ~limit conn) t.pool)
     (function
       | Ok r -> Lwt.return r
       | Error e -> Lwt.fail (Db (Caqti_error.show e)))

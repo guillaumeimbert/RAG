@@ -80,6 +80,40 @@ let mock_vector (s : string) : float list =
   List.init embed_dim (fun i ->
       float_of_int (String.hash (s ^ "#" ^ string_of_int i) land 0xff) /. 255.0)
 
+(* Parse a pgvector [embedding::text] literal (" [0.1,-0.2,]") into
+   floats. *)
+let parse_vec (s : string) : float list =
+  let t = Stringx.trim s in
+  let l = String.length t in
+  if l < 2 || String.get t 0 <> '[' || String.get t (l - 1) <> ']'
+  then failwith ("parse_vec: not a vector literal: " ^ s)
+  else
+    let mid = String.sub t 1 (l - 2) in
+    let acc = ref [] in
+    let cur = ref "" in
+    for i = 0 to String.length mid - 1 do
+      let c = String.get mid i in
+      if c = ','
+      then (acc := float_of_string !cur :: !acc; cur := "")
+      else cur := !cur ^ String.make 1 c
+    done;
+    (if !cur <> "" then acc := float_of_string !cur :: !acc; List.rev !acc)
+
+(** Read query rows as strings (for asserting on stored data). *)
+let pg_query dbname sql : string list list =
+  let c =
+    new Postgresql.connection ~host:pg_host ~port:(string_of_int pg_port)
+      ~dbname:dbname ~user:pg_user ~password:pg_pass () in
+  (try
+     let r = c#exec sql in
+     (match r#status with
+      | Postgresql.Tuples_ok | Postgresql.Command_ok ->
+        let out = r#get_all_lst in
+        c#finish;
+        out
+      | _ -> (c#finish; failwith ("SQL failed: " ^ r#error)))
+   with Postgresql.Error e -> (c#finish; failwith (Postgresql.string_of_error e)))
+
 let openai_handler (path : string) (body : string) : Mock.resp option =
   let json s = Some { Mock.code = 200; content_type = "application/json"; body = s } in
   (match path with
@@ -95,11 +129,14 @@ let openai_handler (path : string) (body : string) : Mock.resp option =
             ; "embedding", `List (List.map (fun f -> `Float f) (mock_vector t)) ])
         texts
     in
+    (* Return the rows REVERSED (index labels intact): a client that reads
+       the rows in arrival order instead of sorting by "index" will assign
+       vectors to the wrong texts — the ordering checks below catch it. *)
     json
       (Yojson.Safe.to_string
          (`Assoc
             [ "object", `String "list"
-            ; "data", `List data
+            ; "data", `List (List.rev data)
             ; "model", `String "mock-embed"
             ; "usage", `Assoc [ "prompt_tokens", `Int 0; "total_tokens", `Int 0 ] ]))
   | "/v1/chat/completions" ->
@@ -217,6 +254,7 @@ let () =
       check "ingest_cik: one ownership event" (s1.Pipeline.events = 1);
       check "ingest_cik: eight 13F positions" (s1.Pipeline.positions = 8);
       check "ingest_cik: Form 4 rows skipped" (s1.Pipeline.skipped = 2);
+      check "ingest_cik: nothing failed" (s1.Pipeline.failed = 0);
 
       (* 2. idempotency: same day again -> nothing new *)
       let s2 = Lwt_main.run (Pipeline.ingest_cik store "1045810") in
@@ -245,9 +283,37 @@ let () =
         match r3 with
         | Pipeline.Ingested r -> r.chunks
         | Pipeline.Skipped -> failwith "ingest_job: 10-K unexpectedly skipped"
+        | Pipeline.Failed why -> failwith ("ingest_job: 10-K failed: " ^ why)
       in
       Printf.printf "  ingest_job 10-K %d chunks\n%!" n3;
       check "ingest_job: 10-K chunks stored" (n3 >= 5);
+
+      (* 3b. embedding ORDER regression: the mock returns its rows in
+         reversed order (index labels intact). (a) embed_all over 20 texts
+         crosses the 16-per-batch boundary — pairs must come back in input
+         order, each text with its own vector; (b) every stored chunk's
+         vector must be the embedding of that chunk's own text. *)
+      let texts20 = List.init 20 (fun i -> "order-probe-" ^ string_of_int i) in
+      let pairs = Lwt_main.run (Pipeline.embed_all cfg texts20) in
+      check "embed_all: 20 texts keep input order across batch boundary"
+        ( List.length pairs = 20
+        && List.for_all2 (fun (t : string) (t2, v) -> t = t2 && v = mock_vector t) texts20 pairs );
+      let crows =
+        pg_query scratch_db "SELECT text, embedding::text FROM chunks ORDER BY doc_id, chunk_index"
+      in
+      check "stored vectors align with their chunks (all docs)"
+        ( List.length crows > 0
+        && List.for_all
+             (fun row ->
+               (match row with
+                | text :: [ embedding ] ->
+                  let want = mock_vector text in
+                  (match parse_vec embedding with
+                   | got -> List.length got = List.length want
+                             && List.for_all2 (fun a b -> abs_float (a -. b) <= 1e-6) want got
+                   | exception Failure _ -> false)
+                | _ -> false))
+             crows );
 
       (* 4. store statistics + retrieval *)
       let st = Lwt_main.run (Store.stats store) in

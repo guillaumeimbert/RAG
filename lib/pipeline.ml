@@ -28,44 +28,50 @@ type stats = {
   docs : int;
   chunks : int;
   skipped : int;
+  failed : int;
+  (** jobs that errored after discovery (embedding/DB); nothing partial
+      was stored (writes are transactional), re-running retries them *)
   events : int;
   (** structured 13D/13G ownership events stored *)
   positions : int;
   (** structured 13F holdings stored *)
 }
 
-let empty_stats = { docs = 0; chunks = 0; skipped = 0; events = 0; positions = 0 }
+let empty_stats = { docs = 0; chunks = 0; skipped = 0; failed = 0; events = 0; positions = 0 }
 
 let show_stats s =
-  F.asprintf "docs=%d chunks=%d events=%d positions=%d skipped=%d"
+  F.asprintf "docs=%d chunks=%d events=%d positions=%d skipped=%d failed=%d"
     s.docs
     s.chunks
     s.events
     s.positions
     s.skipped
+    s.failed
 
 (* ------------------------------------------------------------------ *)
 (* Embedding                                                            *)
 (* ------------------------------------------------------------------ *)
 
 (** Embed [texts] in batches of 16, returning (text, vector) pairs in input
-    order. *)
+    order. Batches are embedded in order and their results concatenated in
+    order (pairs within a batch are ordered by the server's [index] field,
+    enforced by [Openai.embed]). *)
 let embed_all (cfg : Config.t) (texts : string list) : (string * float list) list Lwt.t =
   if List.length texts <= 16
   then
     Lwt.bind (Openai.embed ~cfg texts) (fun vecs ->
       Lwt.return (List.combine texts vecs))
   else
-    let rec go (texts : string list) acc =
+    let rec go (batches : (string * float list) list list) (texts : string list) =
       match texts with
-      | [] -> Lwt.return (List.rev acc)
+      | [] -> Lwt.return (List.concat (List.rev batches))
       | _ ->
         let head = List.take 16 texts in
         let tail = List.drop 16 texts in
         Lwt.bind (Openai.embed ~cfg head) (fun vecs ->
-          go tail (List.combine head vecs @ acc))
+          go (List.combine head vecs :: batches) tail)
     in
-    go texts []
+    go [] texts
 
 (* ------------------------------------------------------------------ *)
 (* One document                                                         *)
@@ -74,8 +80,13 @@ let embed_all (cfg : Config.t) (texts : string list) : (string * float list) lis
 (** Result of one [ingest_job] attempt. *)
 type job_result =
   | Skipped
-  (** form not in [FORMS], the filing is already in the store, or an error
-      made it unusable. *)
+  (** form not in [FORMS], the filing is already in the store, or a
+      fetch/parse failure. In all these cases nothing was written, so the
+      next run simply retries (or, for [FORMS], skips again). *)
+  | Failed of string
+  (** an embedding or database failure. Writes are transactional, so no
+      partial state was left behind either — but the run did not complete
+      cleanly and the caller should surface it (and re-run to retry). *)
   | Ingested of {
       chunks : int;
       events : int;
@@ -100,46 +111,51 @@ let event_row (e : Ownership.event) : Store.own_event_row =
   ; is_amendment = e.is_amendment
   ; index_url = e.index_url }
 
-(** Chunk, embed and store ready [blocks]. Returns the number of chunks
-    stored. *)
-let store_blocks (store : Store.t) (job : job) (blocks0 : Chunk.block list) : int Lwt.t =
+(** Chunk [blocks0] to the configured size and embed every chunk. All
+    external I/O (the embedding calls) happens here, *before* anything is
+    written to the store. Returns (block, vector) pairs in input order. *)
+let embed_blocks (store : Store.t) (blocks0 : Chunk.block list) :
+    (Chunk.block * float list) list Lwt.t =
   let cfg = store.Store.cfg in
-  let index = job.index in
   let blocks =
     blocks0 |> Chunk.chunks ~size:cfg.Config.chunk_size ~overlap:cfg.Config.chunk_overlap
   in
-  let n = List.length blocks in
-  if n = 0
-  then Lwt.return 0
-  else
-    Lwt.bind (embed_all cfg (List.map (fun b -> b.Chunk.text) blocks)) (fun embedded ->
-      let rows =
-        List.mapi
-          (fun i (b, (_text, vec)) ->
-            { Store.doc_id = index.accession
-            ; company = index.company
-            ; cik = index.cik
-            ; ticker = index.ticker
-            ; form = index.form
-            ; filed_at = Date.to_string index.filed_at
-            ; section = b.Chunk.section
-            ; chunk_index = i
-            ; text = b.Chunk.text
-            ; embedding = Store.vector_to_string vec })
-          (List.combine blocks embedded)
-      in
-      Lwt.bind (Store.upsert_chunks store rows) (fun () -> Lwt.return n))
+  Lwt.bind (embed_all cfg (List.map (fun b -> b.Chunk.text) blocks)) (fun embedded ->
+    Lwt.return (List.map (fun ((b : Chunk.block), (_text, vec)) -> (b, vec)) (List.combine blocks embedded)))
+
+(** Build [chunk_row]s for one filing from (block, vector) pairs. *)
+let chunk_rows (index : Edgar.filing_index) (embedded : (Chunk.block * float list) list) :
+    Store.chunk_row list =
+  List.mapi
+    (fun i ((b : Chunk.block), vec) ->
+      { Store.doc_id = index.accession
+      ; company = index.company
+      ; cik = index.cik
+      ; ticker = index.ticker
+      ; form = index.form
+      ; filed_at = Date.to_string index.filed_at
+      ; section = b.Chunk.section
+      ; chunk_index = i
+      ; text = b.Chunk.text
+      ; embedding = Store.vector_to_string vec })
+    embedded
 
 (** Narrative forms (10-K / 10-Q / 8-K / ...): HTML -> text -> chunks ->
-    vectors. *)
+    vectors. Fetch, parse and embed happen first; the chunks are then
+    stored in one transaction. *)
 let ingest_prose_filing (store : Store.t) (job : job) : job_result Lwt.t =
   Lwt.bind (Edgar.get_document store.Store.cfg job.primary_url) (fun html ->
-    store_blocks store job (Html_text.of_html html)
-    >>= fun n -> Lwt.return (Ingested { chunks = n; events = 0; positions = 0 }))
+    Lwt.bind (embed_blocks store (Html_text.of_html html)) (fun embedded ->
+      let rows = chunk_rows job.index embedded in
+      Lwt.bind (Store.upsert_chunks store rows) (fun () ->
+        Lwt.return (Ingested { chunks = List.length rows; events = 0; positions = 0 }))))
 
 (** 13G / 13D: raw XML -> structured ownership events; the narrative
     (items / comments) additionally goes through the vector path so it
-    stays answerable by the LLM. *)
+    stays answerable by the LLM. The embedding happens before any write,
+    and the events and chunks are stored in a single transaction: a
+    failure at any point leaves nothing behind, so the next run retries
+    the whole filing instead of finding it "already ingested". *)
 let ingest_13gd (store : Store.t) (job : job) : job_result Lwt.t =
   let cfg = store.Store.cfg in
   let index = job.index in
@@ -154,16 +170,19 @@ let ingest_13gd (store : Store.t) (job : job) : job_result Lwt.t =
        | Ownership.Form13d -> Ownership.parse_13d xml ~meta ~form:index.form
        | _ -> Ownership.parse_13g xml ~meta ~form:index.form)
     in
-    let rows = List.map event_row events in
-    Lwt.bind (Store.upsert_own_events store rows) (fun () ->
+    let ev_rows = List.map event_row events in
+    let embedded : (Chunk.block * float list) list Lwt.t =
       if prose = ""
-      then Lwt.return (Ingested { chunks = 0; events = List.length events; positions = 0 })
+      then Lwt.return []
       else
-        store_blocks store job
+        embed_blocks store
           [{ Chunk.section = Ownership.norm_form index.form ^ " — items & comments";
              text = prose }]
-        >>= fun n ->
-        Lwt.return (Ingested { chunks = n; events = List.length events; positions = 0 })))
+    in
+    Lwt.bind embedded (fun emb ->
+      let ch_rows = chunk_rows index emb in
+      Lwt.bind (Store.upsert_13gd store ev_rows ch_rows) (fun () ->
+        Lwt.return (Ingested { chunks = List.length ch_rows; events = List.length ev_rows; positions = 0 }))))
 
 (** 13F-HR: raw XML -> structured holdings. Issuer CIKs are resolved
     best-effort against the company-tickers file; unresolved issuers keep
@@ -245,7 +264,10 @@ let ingest_job (store : Store.t) (job : job) : job_result Lwt.t =
         | Ownership.Form13f -> ingest_13f store job)
 
 (** [ingest_job] with per-filing fault isolation: a fetch/parse error
-    skips that filing (with a warning) instead of aborting the run. *)
+    skips that filing (with a warning) instead of aborting the run; an
+    embedding or database failure is reported as [Failed] (again without
+    aborting the run) — in both cases nothing partial was written, so a
+    re-run retries the filing. *)
 let ingest_job_safe (store : Store.t) (job : job) : job_result Lwt.t =
   Lwt.catch
     (fun () -> ingest_job store job)
@@ -256,9 +278,15 @@ let ingest_job_safe (store : Store.t) (job : job) : job_result Lwt.t =
       | Net.Http_error e ->
         Printf.eprintf "  skip %s: %s\n%!" job.index.accession (Net.show_error e);
         Lwt.return Skipped
+      | Store.Db s ->
+        Printf.eprintf "  FAIL %s: database: %s\n%!" job.index.accession s;
+        Lwt.return (Failed ("database: " ^ s))
+      | Openai.Api_error s ->
+        Printf.eprintf "  FAIL %s: inference server: %s\n%!" job.index.accession s;
+        Lwt.return (Failed ("inference server: " ^ s))
       | e ->
-        Printf.eprintf "  skip %s: %s\n%!" job.index.accession (Printexc.to_string e);
-        Lwt.return Skipped)
+        Printf.eprintf "  FAIL %s: %s\n%!" job.index.accession (Printexc.to_string e);
+        Lwt.return (Failed (Printexc.to_string e)))
 
 (* ------------------------------------------------------------------ *)
 (* Per-day                                                              *)
@@ -283,6 +311,7 @@ let ingest_day (store : Store.t) (day : Date.t) : stats Lwt.t =
               Lwt.bind (ingest_job_safe store (make_job index)) (fun r ->
                 (match r with
                  | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
+                 | Failed _ -> stats := { !stats with failed = !stats.failed + 1 }
                  | Ingested r ->
                    stats :=
                      { !stats with
@@ -312,6 +341,7 @@ let ingest_range (store : Store.t) (from : Date.t) (to_ : Date.t) : stats Lwt.t 
       { docs = !stats.docs + s.docs;
         chunks = !stats.chunks + s.chunks;
         skipped = !stats.skipped + s.skipped;
+        failed = !stats.failed + s.failed;
         events = !stats.events + s.events;
         positions = !stats.positions + s.positions }
   in
@@ -457,6 +487,7 @@ let ingest_cik ?limit (store : Store.t) (cik : string) : stats Lwt.t =
         Lwt.bind (ingest_job_safe store job) (fun r ->
           (match r with
            | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
+           | Failed _ -> stats := { !stats with failed = !stats.failed + 1 }
            | Ingested r ->
              stats :=
                { !stats with

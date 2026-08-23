@@ -15,8 +15,9 @@ type block = {
   text : string;
 }
 
-(** Cut [s] to at most [maxlen] characters, preferring a word boundary;
-    force-cuts when there is none. *)
+(** Cut [s] to at most [maxlen] bytes, preferring a word boundary;
+    force-cuts when there is none (backing off to a UTF-8 character
+    boundary so a multi-byte character is never split). *)
 let head_cut s maxlen =
   if String.length s <= maxlen then s
   else
@@ -26,6 +27,13 @@ let head_cut s maxlen =
         decr p
       done;
       if !p = 0 then maxlen else !p
+    in
+    (* The force-cut fallback may land inside a multi-byte character; back
+       off to the nearest character boundary. *)
+    let cut =
+      let c = ref cut in
+      while !c > 0 && (Char.code (String.get s !c) land 0xC0) = 0x80 do decr c done;
+      !c
     in
     String.sub s 0 cut
 
@@ -70,18 +78,25 @@ let chunks (blocks : block list) ~size ~overlap : block list =
   if size <= 0 then failwith "chunks: size must be > 0";
   if blocks = [] then []
   else
+    (* Emit the pending text of one section as one or more chunks: a
+       single block when it fits, a full cut otherwise. Both the final
+       flush and section-boundary flushes go through here, so no block
+       ever exceeds [size], even when a single input block is already
+       longer than [size]. *)
+    let finish section acc =
+      let acc = Stringx.trim acc in
+      if acc = "" then []
+      else if String.length acc < size then [{ section; text = acc }]
+      else cut_chunks acc ~size ~overlap |> List.map (fun text -> { section; text })
+    in
     let rec go section acc blocks =
       match blocks with
-      | [] ->
-        (let acc = Stringx.trim acc in
-         if acc = "" then []
-         else if String.length acc < size then [{ section; text = acc }]
-         else cut_chunks acc ~size ~overlap |> List.map (fun text -> { section; text }))
+      | [] -> finish section acc
       | b :: rest ->
         if b.section <> section && acc <> ""
         then
           (* section boundary: flush the pending chunk; [b] starts fresh. *)
-          { section; text = acc } :: go b.section b.text rest
+          finish section acc @ go b.section b.text rest
         else
           let text = if acc = "" then b.text else acc ^ " " ^ b.text in
           if String.length text >= size

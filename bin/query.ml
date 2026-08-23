@@ -57,8 +57,22 @@ let meta (h : Store.hit) : string =
   let section = if h.section = "" then "" else ", \"" ^ h.section ^ "\"" in
   h.company ^ ticker ^ " — " ^ h.form ^ ", filed " ^ h.filed_at ^ section
 
+(** [truncate s n] = [s] cut to at most [n] bytes (≈ characters for ASCII
+    text), suffixed with an ellipsis when shortened. The cut is backed off
+    to a UTF-8 character boundary so a multi-byte character is never split
+    (a dangling lead byte would make the LLM request body invalid UTF-8
+    and the server reject it). *)
 let truncate s n =
-  if String.length s <= n then s else String.sub s 0 n ^ " […]"
+  if String.length s <= n
+  then s
+  else
+    (* UTF-8 continuation bytes are 10xxxxxx; a cut point [i] is valid iff
+       the byte at [i] starts a character (i.e. is not a continuation
+       byte). Back off from [n] to the nearest such point. *)
+    let is_cont c = (Char.code c land 0xC0) = 0x80 in
+    let i = ref n in
+    while !i > 0 && is_cont (String.get s !i) do decr i done;
+    String.sub s 0 !i ^ " […]"
 
 (* ------------------------------------------------------------------ *)
 (* Structured ownership (SQL, not vectors)                            *)
@@ -87,7 +101,7 @@ let holder_line (h : Store.holder) : string =
     then " (prev event: " ^ fmt_percent h.prev_percent ^ ", " ^ fmt_float h.prev_shares ^ " sh)"
     else ""
   in
-  Printf.sprintf "  %s (%s, event %s, filed%s): %s of %s — %s shares%s" h.filer_name h.form h.event_date passive (fmt_percent h.percent) (if h.class_name = "" then "common stock" else h.class_name) (fmt_float h.shares) prev
+  Printf.sprintf "  %s (%s, event %s, filed %s%s): %s of %s — %s shares%s" h.filer_name h.form h.event_date h.filed_at passive (fmt_percent h.percent) (if h.class_name = "" then "common stock" else h.class_name) (fmt_float h.shares) prev
 
 (** One 13F position row. *)
 let position_line (p : Store.position) : string =

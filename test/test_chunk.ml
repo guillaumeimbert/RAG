@@ -20,6 +20,20 @@ let tests : (string * unit T.test_case list) list =
             T.check T.string "mismatch" "abc" (Chunk.head_cut ("abc " ^ String.make 12 'x') 15));
         T.test_case "no boundary before maxlen -> falls back to maxlen" `Quick (fun () ->
             T.check T.string "mismatch" ("ab" ^ String.make 13 'x') (Chunk.head_cut ("ab" ^ String.make 14 'x') 15));
+        T.test_case "force-cut does not split a 2-byte character" `Quick (fun () ->
+            (* "abcde" + e-acute (C3 A9): a cut at byte 6 would leave the
+               dangling lead byte C3; the cut must back off to 5. *)
+            T.check T.string "mismatch" "abcde" (Chunk.head_cut "abcde\xc3\xa9" 6));
+        T.test_case "force-cut does not split a 3-byte character" `Quick (fun () ->
+            (* "abcd" + em dash (E2 80 94): a cut at byte 5 lands inside
+               the character; the cut must back off to 4. *)
+            T.check T.string "mismatch" "abcd" (Chunk.head_cut "abcd\xe2\x80\x94" 5));
+        T.test_case "long word of multi-byte characters: cut at a boundary" `Quick (fun () ->
+            (* 599 e-accutes (1198 bytes), cut at 101 (a continuation byte):
+               the cut backs off to 100 = 50 whole characters. *)
+            let acc = String.concat "" (List.init 599 (fun _ -> "\xc3\xa9")) in
+            let expected = String.concat "" (List.init 50 (fun _ -> "\xc3\xa9")) in
+            T.check T.string "mismatch" expected (Chunk.head_cut acc 101));
       ] );
     (
       "tail_overlap",
@@ -77,5 +91,19 @@ let tests : (string * unit T.test_case list) list =
             T.check T.bool "is true" true (Tcheck.contains (List.hd (List.rev cs)) "alpha399"));
         T.test_case "size <= 0 fails" `Quick (fun () ->
             T.match_raises "raises" Tcheck.failure_pred (fun () -> ignore (Chunk.chunks ~size:0 ~overlap:10 [{ Chunk.section = "S"; text = "x" }])));
+        T.test_case "section boundary after an oversized block stays within size" `Quick (fun () ->
+            (* a single input block longer than [size], followed by another
+               section: the boundary flush must cut the block, not pass the
+               oversized text through as one chunk *)
+            let big = String.concat " " (List.init 100 (fun i -> "word" ^ string_of_int i)) in
+            let cs =
+              Chunk.chunks ~size:100 ~overlap:10
+                [{ Chunk.section = "A"; text = big }
+                 ; { Chunk.section = "B"; text = "tail" }]
+              |> List.map (fun c -> (c.Chunk.section, c.Chunk.text))
+            in
+            T.check T.bool "is true" true (List.for_all (fun (_, t) -> String.length t <= 100) cs);
+            T.check T.bool "is true" true (List.for_all (fun (s, _) -> s = "A" || s = "B") cs);
+            T.check T.bool "is true" true (List.length cs >= 2))
       ] );
   ]

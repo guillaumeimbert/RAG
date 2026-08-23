@@ -52,7 +52,7 @@ let tests : (string * unit T.test_case list) list =
       "show_stats",
       [
         T.test_case "formats" `Quick (fun () ->
-            T.check T.string "mismatch" "docs=2 chunks=10 events=3 positions=4 skipped=1"
-              (Pipeline.show_stats { Pipeline.docs = 2; chunks = 10; skipped = 1; events = 3; positions = 4 }));
+            T.check T.string "mismatch" "docs=2 chunks=10 events=3 positions=4 skipped=1 failed=0"
+              (Pipeline.show_stats { Pipeline.docs = 2; chunks = 10; skipped = 1; failed = 0; events = 3; positions = 4 }));
       ] );
   ]
