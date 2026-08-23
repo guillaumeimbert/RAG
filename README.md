@@ -16,25 +16,62 @@ ownership-shaped. Everything is stored in **PostgreSQL/pgvector** and
 inference runs against any **OpenAI-compatible** server (vLLM,
 ninfer, llama.cpp, or the cloud).
 
-```
- ingest                                                                  query
- ──────                                                                  ─────
- EDGAR daily-index sitemaps / per-CIK submissions JSON
-        │
-        ▼
- Archives: filing index page → primary document
-        │
-        ├── narrative forms (10-K, 10-Q, 8-K, …): primary document (.htm)
-        │        ▼
-        │   html_text → chunk → OpenAI-compatible /embeddings ──► pgvector
-        │
-        ├── ownership forms (13G, 13D): primary_doc.xml  ──► ownership_events
-        ├── (13F-HR): primary_doc.xml + information_table.xml ► holdings
-        │        (exact fields → SQL; 13G/13D narrative also chunked)
-        ▼
- /search TEXT ◄── vector search
- /ask TEXT      ◄── OpenAI /chat (prose hits + [SQL] ownership evidence)
- /holders       ◄── pure SQL over ownership_events / holdings
+```mermaid
+flowchart TD
+    subgraph SEC["SEC EDGAR — public APIs, no key, fair access"]
+        sitemap["Daily-index sitemaps<br/>complete per-business-day filings"]
+        subs["Submissions JSON<br/>per-CIK filing history"]
+        arch["Archives<br/>filing HTML + raw XML<br/>(primary_doc.xml, information_table.xml)"]
+        tick["company_tickers.json<br/>ticker → CIK"]
+    end
+
+    subgraph ING["Ingest — bin/ingest.exe (lib/pipeline.ml)"]
+        route{"route by form<br/>(Ownership.classify)"}
+        prose["html_text → chunk<br/>heading-aware text blocks"]
+        own["xml + ownership parsers<br/>exact fields"]
+    end
+
+    subgraph OAI["OpenAI-compatible server (.env)"]
+        emb["/embeddings"]
+        chat["/chat/completions"]
+    end
+
+    subgraph DB["PostgreSQL 17 + pgvector"]
+        chunks[("chunks<br/>vector(2560) + HNSW")]
+        events[("ownership_events<br/>13G / 13D")]
+        holdings[("holdings<br/>13F positions")]
+    end
+
+    subgraph QRY["Query — bin/query.exe"]
+        search["search<br/>cosine similarity"]
+        ask["ask<br/>prose hits + [SQL] evidence"]
+        holders["holders<br/>pure SQL, no LLM"]
+    end
+
+    sitemap --> route
+    subs --> route
+    arch --> route
+    tick -.->|resolve CIK| route
+
+    route -->|"10-K · 10-Q · 8-K · …"| prose
+    route -->|"13G · 13D · 13F-HR"| own
+    own -.->|"13G/13D narrative also chunked"| prose
+
+    prose --> emb
+    emb --> chunks
+    own --> events
+    own --> holdings
+
+    chunks --> search
+    chunks --> ask
+    events --> ask
+    holdings --> ask
+    events --> holders
+    holdings --> holders
+
+    search -.->|"embed query"| emb
+    ask -.->|"embed query"| emb
+    ask -->|"grounded prompt"| chat
 ```
 
 ## Documentation
