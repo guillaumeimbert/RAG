@@ -179,22 +179,6 @@ let in_str (s : string) (sub : string) : bool =
     done;
     !r
 
-(** [version_at_least a b] — true when dotted version [a] ("N.N[.N]") is >= [b].
-    Missing components count as 0. *)
-let version_at_least (a : string) (b : string) : bool =
-  let parse (s : string) : int list =
-    String.split_on_char '.' s
-    |> List.map (fun p -> (try int_of_string p with _ -> 0))
-  in
-  let rec cmp (la : int list) (lb : int list) : bool =
-    match la, lb with
-    | [], [] -> true
-    | [], _ -> false
-    | _, [] -> true
-    | xa :: ta, xb :: tb -> if xa > xb then true else if xa < xb then false else cmp ta tb
-  in
-  cmp (parse a) (parse b)
-
 (** Read query rows as strings (for asserting on stored data). *)
 let pg_query dbname sql : string list list =
   let c =
@@ -388,7 +372,7 @@ let () =
          | _ -> "0")
       in
       check "pgvector >= 0.8.0 (required for hnsw.iterative_scan)"
-        (version_at_least pgvec_ver "0.8.0");
+        (Store.version_at_least pgvec_ver "0.8.0");
       Printf.printf "e2e: pgvector %s\n%!" pgvec_ver;
 
       (* Make 429/5xx retry loops (fault injection) finish instantly. *)

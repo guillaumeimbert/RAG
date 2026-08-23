@@ -8,6 +8,37 @@ type pool = (Caqti_lwt.connection, Caqti_error.t) Caqti_lwt_unix.Pool.t
 
 exception Db of string
 
+(** pgvector caps [hnsw.ef_search] at 1000 (out-of-range values are rejected /
+    clamped at scan time). The ANN candidate set is at least [top_k], so the
+    search cannot return more than 1000 hits; [top_k > 1000] is rejected. *)
+let max_top_k = 1000
+
+(** Minimum pgvector version: the filtered-search path sets the
+    [hnsw.iterative_scan] GUC, which was introduced in 0.8.0. PostgreSQL
+    accepts unknown (custom) GUCs, so an older pgvector would silently ignore
+    the setting and the filtered search would return too few rows; check at
+    startup instead. *)
+let min_pgvector = "0.8.0"
+
+(** [version_at_least a b] — true when dotted version [a] ("N.N[.N]", e.g. a
+    pgvector [extversion]) is >= [b]. Missing components count as 0. Pure and
+    side-effect free so the comparison is unit-testable. *)
+let version_at_least (a : string) (b : string) : bool =
+  let parse (s : string) : int list =
+    String.split_on_char '.' s |> List.map (fun p -> (try int_of_string p with _ -> 0))
+  in
+  let rec cmp (la : int list) (lb : int list) : bool =
+    match la, lb with
+    | [], [] -> true
+    (* [a] exhausted: its remaining components are 0, so a >= b iff [b]'s
+       remaining components are all 0 (0.8 == 0.8.0 but 0.8 < 0.8.1). *)
+    | [], lb -> List.for_all (fun x -> x = 0) lb
+    (* [b] exhausted: its remaining components are 0, so a >= b always holds. *)
+    | _, [] -> true
+    | xa :: ta, xb :: tb -> if xa > xb then true else if xa < xb then false else cmp ta tb
+  in
+  cmp (parse a) (parse b)
+
 let connect (url : string) : pool Lwt.t =
   match Caqti_lwt_unix.connect_pool (Uri.of_string url) with
   | Error e -> Lwt.fail (Db (Caqti_error.show e))
@@ -541,8 +572,37 @@ type t = {
   cfg : Config.t;
 }
 
+(** The installed pgvector version (a single [extversion] row, or an error when
+    the extension is not present). *)
+let pgvector_version_q =
+  let open Caqti_type.Std in
+  Caqti_request.Infix.( ( ->! ) unit string
+    "SELECT extversion FROM pg_extension WHERE extname = 'vector' ")
+
 let create (cfg : Config.t) : t Lwt.t =
-  Lwt.bind (connect cfg.Config.database_url) (fun pool -> Lwt.return { pool; cfg })
+  (* Fail fast if pgvector is missing or older than the minimum: an older
+     extension silently ignores the hnsw.iterative_scan GUC the filtered search
+     relies on (Postgres accepts unknown custom GUCs), so the search would
+     return too few rows with no error. *)
+  Lwt.bind (connect cfg.Config.database_url) (fun pool ->
+    Lwt.bind
+      ( Caqti_lwt_unix.Pool.use
+          (fun conn ->
+            let module Db = (val conn : Caqti_lwt.CONNECTION) in
+            Db.find pgvector_version_q ())
+          pool )
+      (function
+        | Ok v ->
+          if version_at_least v min_pgvector
+          then Lwt.return { pool; cfg }
+          else
+            Lwt.fail
+              (Db
+                 ("pgvector " ^ v ^ " is too old: the filtered search needs "
+                  ^ min_pgvector ^ " or newer (hnsw.iterative_scan)"))
+        | Error e ->
+          Lwt.fail
+            (Db ("pgvector version check failed: " ^ Caqti_error.show e))))
 
 let close t : unit Lwt.t = close_pool t.pool
 
@@ -611,12 +671,19 @@ let upsert_chunks ?(force = false) t (doc_id : string) (rows : chunk_row list) :
     below [top_k] would silently truncate the answer) and larger (5x, capped at
     50) to give the rerank room to recover the true nearest neighbours that
     half-precision ordering displaced. For [top_k > 50] the candidate set is
-    [top_k] itself (no extra buffer, but never fewer than requested). Raises
-    [Invalid_argument] for [top_k < 1]. Pure and side-effect free so the
+    [top_k] itself (no extra buffer, but never fewer than requested). The
+    candidate set feeds [hnsw.ef_search], which pgvector caps at 1000, so
+    [top_k > max_top_k] is rejected. Raises [Invalid_argument] for
+    [top_k < 1] or [top_k > max_top_k]. Pure and side-effect free so the
     boundaries are unit-testable. *)
 let candidate_of (top_k : int) : int =
   if top_k < 1
   then invalid_arg "Store.candidate_of: top_k must be >= 1"
+  else if top_k > max_top_k
+  then
+    invalid_arg
+      ("Store.candidate_of: top_k must be <= " ^ string_of_int max_top_k
+       ^ " (pgvector caps hnsw.ef_search at " ^ string_of_int max_top_k ^ ")")
   else max top_k (min 50 (top_k * 5))
 
 (** Vector search with optional metadata filters (empty/None = no filter). *)

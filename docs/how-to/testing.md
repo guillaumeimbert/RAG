@@ -101,9 +101,13 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   query takes the HNSW expression-index path and (b) without
   `hnsw.iterative_scan` the single-pass scan returns too few rows while
   `strict_order` (what the search sets) returns the full top-k,
-- **pgvector version**: the e2e checks the installed pgvector extension is
-  >= 0.8.0 (the `hnsw.iterative_scan` GUC the filtered search relies on was
-  introduced in 0.8.0) and fails fast if it is older,
+- **pgvector version**: both the application and the e2e check the installed
+  pgvector extension is >= 0.8.0 (the `hnsw.iterative_scan` GUC the filtered
+  search relies on was introduced in 0.8.0) and fail fast if it is missing or
+  older. The application performs the check at startup (`Store.create`), so an
+  older extension is caught before any query runs — important because Postgres
+  accepts unknown custom GUCs, so an older pgvector would silently ignore
+  `hnsw.iterative_scan` and return too few rows with no error,
 - **structured retrieval** (latest-event-per-filer selection,
   previous-event deltas, multiple filers, amendment flag),
 - **chunk quality / data integrity** (every stored chunk is nonempty,
@@ -141,6 +145,11 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   the *i*-th hit must carry citation `[i+1]` in both the excerpts block
   given to the LLM and the Sources block printed after its answer, so the
   model's `[n]` markers resolve to the right filing.
+- The unit tests also cover the **ANN candidate bound** (`Store.candidate_of`):
+  the candidate set is always >= `top_k` (so `--top-k N` never truncates), and
+  `top_k` is rejected below 1 or above 1000 — pgvector caps `hnsw.ef_search`
+  (which tracks the candidate set) at 1000, so a larger `top_k` could not be
+  served. The pure `version_at_least` comparator is unit-tested too.
 - The e2e test applies the schema files itself, in order (`0001` through
   `0004_halfvec_hnsw.sql`). If you add `schema/0005_*.sql`, add it to
   `test/e2e.ml`'s apply list too.

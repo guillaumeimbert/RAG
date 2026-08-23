@@ -10,6 +10,10 @@
 
 services:
   db:
+    # Floating tag: always the newest pgvector built for Postgres 17. The
+    # application checks the installed pgvector version at startup (it must be
+    # >= 0.8.0 for hnsw.iterative_scan) and fails fast otherwise. Pin an
+    # explicit version tag (e.g. pg17-0.8.0) for reproducible builds.
     image: pgvector/pgvector:pg17
     # Explicit name so it never collides with other local stacks
     # (podman-compose otherwise derives "rag_db_1" from this directory name).

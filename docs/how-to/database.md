@@ -132,6 +132,15 @@ slower; fine at typical store sizes).
 
 The filtered-search path sets the `hnsw.iterative_scan` GUC so that a
 selective metadata filter does not silently return too few rows. That GUC
-requires **pgvector ≥ 0.8.0**. The pinned image (`pgvector/pgvector:pg17`)
-ships pgvector 0.8.x; the e2e suite checks the installed extension version
-and fails fast if it is older.
+requires **pgvector ≥ 0.8.0**. Postgres accepts unknown custom GUCs, so an
+older extension would silently ignore the setting (the filtered search would
+then return too few rows with no error); to close that gap the application
+checks the installed extension version at startup (`Store.create`) and fails
+fast if it is missing or older than 0.8.0. The e2e suite repeats the same
+check.
+
+Note: the compose file uses the **floating** tag `pgvector/pgvector:pg17`
+(always the newest pgvector built for Postgres 17), so the version is not
+fixed by the image reference — the startup check is what keeps the
+requirement honest. Pin an explicit version tag (e.g.
+`pgvector/pgvector:pg17-0.8.0`) if you need reproducible builds.
