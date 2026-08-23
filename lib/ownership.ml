@@ -444,8 +444,8 @@ type position = {
   put_call : string;
   (** SEC [putCall] ("Put" / "Call"); "" when the element is absent *)
   other_manager : string;
-  (** SEC [otherManager] (e.g. "Yes", or an identifier); non-empty when the
-      position is reported on behalf of another manager; "" when absent *)
+  (** SEC [otherManager] (Column 7) — a numbered reference to an included
+      other manager; blank / "N/A" / "0" when inapplicable; stored raw *)
   discretion : string;
   vote_sole : int option;
   vote_shared : int option;

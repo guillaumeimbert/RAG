@@ -117,7 +117,7 @@ amendment re-files the full table under a new accession.
 | `shares` | `NUMERIC NULL` | |
 | `prnamt_type` | `TEXT NOT NULL DEFAULT ''` | `SH` / `PRN` / `UNIT` (the share-or-principal type, not put/call) |
 | `put_call` | `TEXT NOT NULL DEFAULT ''` | SEC `putCall` (`Put` / `Call`); `''` when absent |
-| `other_manager` | `TEXT NOT NULL DEFAULT ''` | SEC `otherManager` (e.g. `Yes`, or an identifier); non-empty when the position is reported for another manager, `''` when absent |
+| `other_manager` | `TEXT NOT NULL DEFAULT ''` | SEC `otherManager` (Column 7) — a numbered reference to an included other manager; blank / `N/A` / `0` when inapplicable (stored raw) |
 | `discretion` | `TEXT NULL` | Investment discretion (`SOLE`, `SHARED`, …) |
 | `vote_sole` / `vote_shared` / `vote_none` | `NUMERIC NULL` | Voting authority shares |
 
@@ -126,6 +126,13 @@ Primary key: `(accession, position_index)`. Indexes: B-tree on
 query (`Store.positions_of`) aggregates the rows of each (filer, report) —
 summing value and shares across lots — before picking the latest report per
 filer.
+
+13F **amendments** (13F-HR/A) are not supported and are skipped at ingest.
+An amendment may *supplement* (rather than restate) the original, and the
+retrieval keeps a single latest report per filer; storing an additive
+amendment would therefore drop the original positions. The original filing
+remains the authoritative (complete) snapshot. The default `FORMS` excludes
+amendments, so this only matters when `FORMS=ALL` or `13F-HR/A` is enabled.
 
 ## Query conventions
 

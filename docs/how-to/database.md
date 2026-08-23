@@ -87,7 +87,7 @@ affected date to rewrite them with the true ordinals and the SEC
 `putCall` / `otherManager` fields:
 
 ```sh
-dune exec bin/ingest.exe day --date YYYY-MM-DD --force
+dune exec bin/ingest.exe -- day YYYY-MM-DD --force
 ```
 
 When the index is (re)built on a large store, pgvector builds the HNSW graph

@@ -87,4 +87,20 @@ let tests : (string * unit T.test_case list) list =
             T.check T.int "failed" 1 st.Pipeline.failed;
             T.check T.int "docs" 0 st.Pipeline.docs);
       ] );
+    (
+      "is_13f_amendment",
+      [
+        T.test_case "13F-HR/A is an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" true (Pipeline.is_13f_amendment "13F-HR/A"));
+        T.test_case "SCHEDULE 13F-HR/A (prefixed) is an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" true (Pipeline.is_13f_amendment "SCHEDULE 13F-HR/A"));
+        T.test_case "13F-STR/A (short-form amendment) is an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" true (Pipeline.is_13f_amendment "13F-STR/A"));
+        T.test_case "13F-HR (the original) is not an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" false (Pipeline.is_13f_amendment "13F-HR"));
+        T.test_case "13F-STR is not an amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" false (Pipeline.is_13f_amendment "13F-STR"));
+        T.test_case "10-K/A (a non-13F amendment) is not a 13F amendment" `Quick (fun () ->
+            T.check T.bool "mismatch" false (Pipeline.is_13f_amendment "10-K/A"));
+      ] );
   ]

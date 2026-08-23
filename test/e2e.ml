@@ -87,6 +87,7 @@ let master_idx_e2e_ownership =
   ^ "--------------------------------------------------------------------------------\n"
   ^ "1045810|NVIDIA CORP|SCHEDULE 13G|20260821|edgar/data/1045810/0001045810-26-000062.txt\n"
   ^ "1045810|NVIDIA CORP|13F-HR|20260821|edgar/data/1045810/0001045810-26-000065.txt\n"
+  ^ "1045810|NVIDIA CORP|13F-HR/A|20260821|edgar/data/1045810/0001045810-26-000066.txt\n"
   ^ "7777777|OMEGA CORP|4|20260821|edgar/data/7777777/0007777777-26-001000.txt"
 
 (* Track which index-page paths the EDGAR mock serves, so the e2e can prove
@@ -270,6 +271,11 @@ let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
     html (fixture "13g_index.html")
   | "/Archives/edgar/data/1045810/0001045810-26-000065-index.htm" ->
     html (fixture "13f_index.html")
+  (* 13F amendment (not supported): the index page is fetched (the form is
+     allow-listed so the pre-filter passes) but the job is skipped before any
+     rows are stored, so the accession never reaches the holdings table. *)
+  | "/Archives/edgar/data/1045810/0001045810-26-000066-index.htm" ->
+    html (fixture "13f_index.html")
   | "/Archives/edgar/data/1045810/000104581026000065/primary_doc.xml" ->
     xml (fixture "13f_nvda_primary.xml")
   | "/Archives/edgar/data/1045810/000104581026000065/infotable.xml" ->
@@ -395,6 +401,49 @@ let () =
       in
       check "migration 0006 idempotent: ownership_events UK is (accession, event_index) after a second run"
         (own_events_uk_cols = "{accession,event_index}");
+      (* 0b. migration 0005 back-fill: insert LEGACY rows (old content PK)
+         BEFORE applying 0005, then verify the back-fill assigns a unique
+         0-based per-accession ordinal and swaps the key. A separate scratch
+         DB is used because the main scratch DB applies 0005 in the schema
+         sequence, with no legacy rows to back-fill. *)
+      let mig_db = "raguesslighter_e2e_migrate" in
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ mig_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ mig_db ^ ";");
+      pg_exec mig_db schema;
+      pg_exec mig_db schema2;  (* 0002: holdings with the old content PK *)
+      pg_exec mig_db
+        ("INSERT INTO holdings (accession, filer_cik, filer_name, period, filed_at, "
+         ^ "issuer_name, issuer_cusip, class, value_usd, shares, prnamt_type) VALUES "
+         ^ "('8888-0001', '0000000001', 'LEGACY FUND', '2026-03-31', '2026-05-15', 'A CORP', 'CUSIP_A', 'COM', 100, 10, 'SH'), "
+         ^ "('8888-0001', '0000000001', 'LEGACY FUND', '2026-03-31', '2026-05-15', 'B CORP', 'CUSIP_B', 'COM', 200, 20, 'SH'), "
+         ^ "('8888-0002', '0000000001', 'LEGACY FUND', '2026-03-31', '2026-05-15', 'C CORP', 'CUSIP_C', 'COM', 300, 30, 'SH');");
+      pg_exec mig_db schema5;  (* back-fills position_index, swaps the PK *)
+      let legacy_ords =
+        pg_query mig_db
+          "SELECT accession, position_index FROM holdings ORDER BY accession, position_index"
+      in
+      check "migration 0005 back-fill: legacy rows get a unique 0-based ordinal per accession"
+        ( List.length legacy_ords = 3
+        && (match legacy_ords with
+             | [ [a1; o1]; [a2; o2]; [a3; o3] ] ->
+               a1 = "8888-0001" && o1 = "0"
+               && a2 = "8888-0001" && o2 = "1"
+               && a3 = "8888-0002" && o3 = "0"
+             | _ -> false) );
+      let mig_pk_cols =
+        (match
+           pg_query mig_db
+             ("SELECT array_agg(a.attname::text ORDER BY k.ord) FROM pg_constraint c "
+              ^ "CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) "
+              ^ "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum "
+              ^ "WHERE c.conrelid = 'holdings'::regclass AND c.contype = 'p'")
+         with
+         | [ [v] ] -> v
+         | _ -> "")
+      in
+      check "migration 0005 back-fill: PK is (accession, position_index) after the swap"
+        (mig_pk_cols = "{accession,position_index}");
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ mig_db ^ ";");
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;
 
       (* pgvector >= 0.8.0 is required: the filtered-search path relies on the
@@ -1602,6 +1651,11 @@ let () =
           with Config.database_url =
             Printf.sprintf "postgresql://%s:%s@%s:%d/%s" pg_user pg_pass pg_host pg_port
               own_db;
+              (* Include the 13F amendment so the pre-filter passes it to the
+                 ingest job, which must then SKIP it (the amendment guard).
+                 Without this the master pre-filter would drop it before the
+                 guard is ever exercised. *)
+          Config.forms = [ "10-K"; "10-Q"; "8-K"; "13F-HR"; "13F-HR/A"; "13G" ];
         }
       in
       let ostore = Lwt_main.run (Store.create ocfg) in
@@ -1620,6 +1674,22 @@ let () =
         (oreq "/Archives/edgar/data/1045810/0001045810-26-000062-index.htm");
       check "ingest_day (ownership): 13F index page fetched"
         (oreq "/Archives/edgar/data/1045810/0001045810-26-000065-index.htm");
+      (* 13F amendment (13F-HR/A) is allow-listed above so the pre-filter
+         passes it, but the ingest job SKIPS it: the index page is fetched
+         (proving it reached the job) yet no rows are stored. A stored
+         additive amendment would otherwise drop the original positions. *)
+      check "ingest_day (ownership): 13F amendment index page fetched"
+        (oreq "/Archives/edgar/data/1045810/0001045810-26-000066-index.htm");
+      let amendment_holdings =
+        (match
+           pg_query own_db
+             "SELECT count(*)::int FROM holdings WHERE accession = '0001045810-26-000066'"
+         with
+         | [ [ n ] ] -> int_of_string n
+         | _ -> -1)
+      in
+      check "ingest_day (ownership): 13F amendment is skipped (no rows stored)"
+        (amendment_holdings = 0);
       check "ingest_day (ownership): Form 4 index page NOT fetched (pre-filtered)"
         (not (oreq "/Archives/edgar/data/7777777/0007777777-26-001000-index.htm"));
       Lwt_main.run (Store.close ostore);
