@@ -70,6 +70,25 @@ let master_idx_e2e =
   ^ "9999999|ZETA CORP|4|20260820|edgar/data/9999999/0009999999-26-000900.txt\n"
   ^ "8888888|ETA CORP|424B2|20260820|edgar/data/8888888/0008888888-26-000901.txt"
 
+(** Master index for the ownership-ingestion test (step 11): one SCHEDULE 13G
+    and one 13F-HR (both allow-listed; their index pages and data documents
+    the mock serves) plus a Form 4 (NOT allow-listed, pre-filtered out). This
+    is the live scenario where the 13G was silently skipped (the form regex
+    stopped at the space in "SCHEDULE 13G") and the 13F stored zero positions
+    (the information table was assumed to be "information_table.xml" instead
+    of the index-named "infotable.xml"). *)
+let master_idx_e2e_ownership =
+  "Description:           Daily Index of EDGAR Dissemination Feed\n"
+  ^ "Last Data Received:    Aug 21, 2026\n"
+  ^ "Comments:              webmaster@sec.gov\n"
+  ^ "Anonymous FTP:         ftp://ftp.sec.gov/edgar/\n"
+  ^ " \n"
+  ^ "CIK|Company Name|Form Type|Date Filed|File Name\n"
+  ^ "--------------------------------------------------------------------------------\n"
+  ^ "1045810|NVIDIA CORP|SCHEDULE 13G|20260821|edgar/data/1045810/0001045810-26-000062.txt\n"
+  ^ "1045810|NVIDIA CORP|13F-HR|20260821|edgar/data/1045810/0001045810-26-000065.txt\n"
+  ^ "7777777|OMEGA CORP|4|20260821|edgar/data/7777777/0007777777-26-001000.txt"
+
 (* Track which index-page paths the EDGAR mock serves, so the e2e can prove
    the master-index pre-filter avoided fetching unwanted index pages. The
    mock handler runs in its own thread, so the list is guarded by a mutex. *)
@@ -224,10 +243,17 @@ let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
   | "/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm" -> html doc
   | "/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm" -> html doc
   | "/Archives/edgar/data/1045810/000104581026000069/nvda-20260817.htm" -> html doc
-  (* ownership filings: raw data XML at the accession root *)
+  (* ownership filings: raw data XML at the accession root. The index pages
+     name the information table "infotable.xml" (not the assumed
+     "information_table.xml"); [info_table_url_of] resolves the name from the
+     index, so the mock serves it under that real name. *)
+  | "/Archives/edgar/data/1045810/0001045810-26-000062-index.htm" ->
+    html (fixture "13g_index.html")
+  | "/Archives/edgar/data/1045810/0001045810-26-000065-index.htm" ->
+    html (fixture "13f_index.html")
   | "/Archives/edgar/data/1045810/000104581026000065/primary_doc.xml" ->
     xml (fixture "13f_nvda_primary.xml")
-  | "/Archives/edgar/data/1045810/000104581026000065/information_table.xml" ->
+  | "/Archives/edgar/data/1045810/000104581026000065/infotable.xml" ->
     xml (fixture "13f_nvda_table.xml")
   | "/Archives/edgar/data/1045810/000104581026000062/primary_doc.xml" ->
     xml (fixture "13g_nvda.xml")
@@ -248,6 +274,9 @@ let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
   (* daily master index for the ingest_day pre-filter test (step 10) *)
   | "/2026/QTR3/master.20260820.idx" ->
     Some { Mock.code = 200; content_type = "text/plain"; body = master_idx_e2e }
+  (* daily master index for the ownership-ingestion test (step 11) *)
+  | "/2026/QTR3/master.20260821.idx" ->
+    Some { Mock.code = 200; content_type = "text/plain"; body = master_idx_e2e_ownership }
   | _ -> None)
 
 let edgar_handler (path : string) (_body : string) : Mock.resp option =
@@ -626,6 +655,7 @@ let () =
           report_date = None;
           primary_document;
           primary_description = "";
+          info_table_document = None;
           (* index_url uses the dashed accession (codebase convention); the
              document path is derived undashed by [Edgar.accession_root]. *)
           index_url =
@@ -1088,6 +1118,49 @@ let () =
         (not (req "/Archives/edgar/data/8888888/0008888888-26-000901-index.htm"));
       Lwt_main.run (Store.close mstore);
       pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ master_db ^ ";");
+
+      (* 11. ownership ingestion through the master path: a SCHEDULE 13G and a
+         13F-HR are allow-listed and their index pages fetched; the 13G now
+         ingests its event (the form regex no longer stops at the space in
+         "SCHEDULE 13G", and the data is the index's .xml, not the .html twin)
+         and the 13F now stores its positions (the information table is
+         resolved from the index-named "infotable.xml", not the assumed
+         "information_table.xml"). A Form 4 is pre-filtered out. Runs on a
+         dedicated database so the main scratch store is undisturbed. *)
+      let own_db = "raguesslighter_e2e_ownership" in
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ own_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ own_db ^ ";");
+      pg_exec own_db schema;
+      pg_exec own_db schema2;
+      pg_exec own_db schema3;
+      let ocfg =
+        {
+          cfg
+          with Config.database_url =
+            Printf.sprintf "postgresql://%s:%s@%s:%d/%s" pg_user pg_pass pg_host pg_port
+              own_db;
+        }
+      in
+      let ostore = Lwt_main.run (Store.create ocfg) in
+      ignore (drain_index_requests ());  (* clear any prior windows *)
+      let so = Lwt_main.run (Pipeline.ingest_day ostore (Date.of_string "2026-08-21")) in
+      Printf.printf "  ingest_day (ownership) %s\n%!" (Pipeline.show_stats so);
+      check "ingest_day (ownership): both 13G and 13F ingested" (so.Pipeline.docs = 2);
+      check "ingest_day (ownership): nothing failed" (so.Pipeline.failed = 0);
+      check "ingest_day (ownership): 13G event stored (space-form no longer skipped)"
+        (so.Pipeline.events = 1);
+      check "ingest_day (ownership): 13F positions stored (index-named info table resolved)"
+        (so.Pipeline.positions = 8);
+      let own_reqs = drain_index_requests () in
+      let oreq p = List.mem p own_reqs in
+      check "ingest_day (ownership): 13G index page fetched"
+        (oreq "/Archives/edgar/data/1045810/0001045810-26-000062-index.htm");
+      check "ingest_day (ownership): 13F index page fetched"
+        (oreq "/Archives/edgar/data/1045810/0001045810-26-000065-index.htm");
+      check "ingest_day (ownership): Form 4 index page NOT fetched (pre-filtered)"
+        (not (oreq "/Archives/edgar/data/7777777/0007777777-26-001000-index.htm"));
+      Lwt_main.run (Store.close ostore);
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ own_db ^ ";");
 
       (* cleanup *)
       Lwt_main.run (Store.close store);

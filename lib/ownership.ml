@@ -3,9 +3,9 @@
     direction) and Form 13F (quarterly institutional position reports).
 
     Modern EDGAR submissions carry machine-readable XML for these forms
-    (a [primary_doc.xml] for 13D/13G; a [primary_doc.xml] plus
-    [information_table.xml] for 13F), often under an [xsl.../] directory.
-    This module turns that XML into rows for the [ownership_events] and
+    (a [primary_doc.xml] for 13D/13G; a [primary_doc.xml] plus a holdings
+    information table for 13F, whose file name varies by filer, e.g.
+    [infotable.xml]). This module turns that XML into rows for the [ownership_events] and
     [holdings] tables (schema 0002) — structured retrieval by SQL instead
     of chunked prose. The human-readable parts of the filings (13G
     comments, 13D items such as funds source / transaction purpose) are

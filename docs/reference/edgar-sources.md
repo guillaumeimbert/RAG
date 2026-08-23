@@ -69,15 +69,16 @@ default base URLs from
 ```
 
 - Plain, static, cacheable. Two document families matter:
-  - **Primary document** (HTML): the human-readable filing, 1 KB to
-    ~20 MB. For narrative forms the app fetches the document listed
-    as `primaryDocument` on the index page; for ownership filings the
-    listed primary document is styled HTML, so the app instead fetches
-    the **raw XML at the accession root**.
-  - **Raw XML at the accession root**: `primary_doc.xml` (the 13G/13D
-    cover, or the 13F cover) and, for 13F-HR, `information_table.xml`
-    (the holdings table). The `xsl…/primary_doc.xml` variant listed on
-    the index page is styled HTML, not data, and is not used.
+  - **Primary document**: the filing body. For narrative forms (10-K,
+    8-K, …) the index lists a single primary document, which the app
+    fetches. For ownership filings (13F/13G/13D) the index lists the data
+    `.xml` right beside a `.html` "friendly" twin under the **same Type**;
+    the app selects the `.xml` row (the raw data at the accession root) and
+    fetches that, not the `.html` (whose link is styled `xsl…/` output).
+  - **13F information table**: the 13F-HR holdings table, listed on the
+    index as the `INFORMATION TABLE` document. Its file name varies by
+    filer (e.g. `infotable.xml`), so the app reads the name from the index
+    rather than assuming one.
 - Used by: the ingest pipeline (prose path) and the ownership
   parsers (structured path).
 

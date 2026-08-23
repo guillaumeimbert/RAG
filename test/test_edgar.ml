@@ -125,6 +125,47 @@ let tests : (string * unit T.test_case list) list =
             let filing =
               { Edgar.accession = "0000000000-24-008189"; cik = "2019042"; index_url = "http://x" } in
             T.check (T.option T.string) "mismatch" None (Edgar.parse_index filing (F.read_text (F.fix "letter_filing_index.html")) |> Option.map (fun fi -> fi.Edgar.form)) );
+        T.test_case "13G index page (form with a space, no information table)" `Quick (fun () ->
+            let filing =
+              {
+                Edgar.accession = "0001045810-26-000062";
+                cik = "1045810";
+                index_url =
+                  "https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000062-index.htm";
+              } in
+            let fi =
+              match Edgar.parse_index filing (F.read_text (F.fix "13g_index.html")) with
+              | Some fi -> fi
+              | None -> raise (Edgar.Failure "parse failed")
+            in
+            (* the form code contains a space: the old regex stopped at the
+               first space ("SCHEDULE") and dropped the whole filing. *)
+            T.check T.string "form" "SCHEDULE 13G" fi.Edgar.form;
+            T.check (T.option T.string) "info table" None fi.Edgar.info_table_document;
+            (* the index lists a .html twin first, but the data is the .xml; the
+               parser must pick the .xml, not the .html. *)
+            T.check T.string "primary document" "primary_doc.xml" fi.Edgar.primary_document;
+            T.check T.string "company" "NVIDIA CORP" fi.Edgar.company);
+        T.test_case "13F index page (information table filename from the index)" `Quick (fun () ->
+            let filing =
+              {
+                Edgar.accession = "0001045810-26-000065";
+                cik = "1045810";
+                index_url =
+                  "https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000065-index.htm";
+              } in
+            let fi =
+              match Edgar.parse_index filing (F.read_text (F.fix "13f_index.html")) with
+              | Some fi -> fi
+              | None -> raise (Edgar.Failure "parse failed")
+            in
+            (* the information table is named in the index ("infotable.xml"),
+               not the assumed "information_table.xml"; the .html twin is not
+               the data file. *)
+            T.check T.string "form" "13F-HR" fi.Edgar.form;
+            T.check (T.option T.string) "info table" (Some "infotable.xml") fi.Edgar.info_table_document;
+            (* the .html twin is listed first; the data is the .xml. *)
+            T.check T.string "primary document" "primary_doc.xml" fi.Edgar.primary_document);
       ] );
     (
       "primary_url",
@@ -140,11 +181,50 @@ let tests : (string * unit T.test_case list) list =
                 report_date = Some (Date.of_string "2026-01-25");
                 primary_document = "nvda-20260125.htm";
                 primary_description = "10-K";
+                info_table_document = None;
                 index_url =
                   "https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000021-index.htm";
                 ticker = "NVDA";
               } in
             T.check T.string "mismatch" "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm" (Edgar.primary_url fi));
+      ] );
+    (
+      "info_table_url",
+      [
+        T.test_case "uses the information table named in the index" `Quick (fun () ->
+            let fi =
+              {
+                Edgar.accession = "0001045810-26-000065";
+                cik = "0001045810";
+                company = "NVIDIA CORP";
+                form = "13F-HR";
+                filed_at = Date.of_string "2026-08-20";
+                report_date = Some (Date.of_string "2026-06-30");
+                primary_document = "primary_doc.xml";
+                primary_description = "";
+                info_table_document = Some "infotable.xml";
+                index_url =
+                  "https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000065-index.htm";
+                ticker = "NVDA";
+              } in
+            T.check T.string "mismatch" "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000065/infotable.xml" (Edgar.info_table_url fi));
+        T.test_case "falls back to information_table.xml when the index names none" `Quick (fun () ->
+            let fi =
+              {
+                Edgar.accession = "0001045810-26-000065";
+                cik = "0001045810";
+                company = "NVIDIA CORP";
+                form = "13F-HR";
+                filed_at = Date.of_string "2026-08-20";
+                report_date = Some (Date.of_string "2026-06-30");
+                primary_document = "primary_doc.xml";
+                primary_description = "";
+                info_table_document = None;
+                index_url =
+                  "https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000065-index.htm";
+                ticker = "NVDA";
+              } in
+            T.check T.string "mismatch" "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000065/information_table.xml" (Edgar.info_table_url fi));
       ] );
     (
       "master_url",

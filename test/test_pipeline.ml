@@ -55,4 +55,36 @@ let tests : (string * unit T.test_case list) list =
             T.check T.string "mismatch" "docs=2 chunks=10 events=3 positions=4 skipped=1 failed=0"
               (Pipeline.show_stats { Pipeline.docs = 2; chunks = 10; skipped = 1; failed = 0; events = 3; positions = 4 }));
       ] );
+    (
+      "apply_result",
+      [
+        T.test_case "a zero-row Ingested counts as skipped, not docs" `Quick (fun () ->
+            let s = ref Pipeline.empty_stats in
+            Pipeline.apply_result s (Pipeline.Ingested { chunks = 0; events = 0; positions = 0 });
+            let st = !s in
+            T.check T.int "docs" 0 st.Pipeline.docs;
+            T.check T.int "skipped" 1 st.Pipeline.skipped;
+            T.check T.int "failed" 0 st.Pipeline.failed);
+        T.test_case "a non-zero-row Ingested counts as docs and rows" `Quick (fun () ->
+            let s = ref Pipeline.empty_stats in
+            Pipeline.apply_result s (Pipeline.Ingested { chunks = 3; events = 1; positions = 8 });
+            let st = !s in
+            T.check T.int "docs" 1 st.Pipeline.docs;
+            T.check T.int "chunks" 3 st.Pipeline.chunks;
+            T.check T.int "events" 1 st.Pipeline.events;
+            T.check T.int "positions" 8 st.Pipeline.positions;
+            T.check T.int "skipped" 0 st.Pipeline.skipped);
+        T.test_case "Skipped increments skipped" `Quick (fun () ->
+            let s = ref Pipeline.empty_stats in
+            Pipeline.apply_result s Pipeline.Skipped;
+            let st = !s in
+            T.check T.int "skipped" 1 st.Pipeline.skipped;
+            T.check T.int "docs" 0 st.Pipeline.docs);
+        T.test_case "Failed increments failed" `Quick (fun () ->
+            let s = ref Pipeline.empty_stats in
+            Pipeline.apply_result s (Pipeline.Failed "boom");
+            let st = !s in
+            T.check T.int "failed" 1 st.Pipeline.failed;
+            T.check T.int "docs" 0 st.Pipeline.docs);
+      ] );
   ]

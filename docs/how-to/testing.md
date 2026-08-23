@@ -98,6 +98,13 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   any per-filing fetch, so the index pages of allow-listed filings are
   fetched while the index pages of non-allow-listed filings (a Form 4 and a
   424B2 in the mock) are provably **never requested**),
+- **ownership ingestion through the master path** (`ingest day`): a
+  `SCHEDULE 13G` and a `13F-HR` in the day's master index are both
+  ingested — the 13G's event is stored (the index parser captures the full
+  spaced form name and fetches the data `.xml`, not the `.html` twin) and
+  the 13F's positions are stored (the information table is resolved from
+  the index-named `infotable.xml`, not an assumed file name), while a
+  non-allow-listed Form 4 in the same master file is pre-filtered out),
 - **CLI exit codes** (via the built binary, when `RAG_E2E_INGEST_BIN`
   is set).
 

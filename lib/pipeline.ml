@@ -94,6 +94,26 @@ type job_result =
       positions : int;
     }
 
+(** Fold one [ingest_job_safe] result into a [stats] accumulator. A job that
+    persisted zero rows (a 13F with no information table, or a filing with no
+    extractable text) is counted as [skipped] rather than [docs]: nothing was
+    stored, so it is not a document — and, being absent from the store, the
+    "already ingested" check re-attempts it on the next run. *)
+let apply_result (stats : stats ref) (res : job_result) : unit =
+  match res with
+  | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
+  | Failed _ -> stats := { !stats with failed = !stats.failed + 1 }
+  | Ingested r ->
+    if r.chunks + r.events + r.positions = 0
+    then stats := { !stats with skipped = !stats.skipped + 1 }
+    else
+      stats :=
+        { !stats with
+          docs = !stats.docs + 1;
+          chunks = !stats.chunks + r.chunks;
+          events = !stats.events + r.events;
+          positions = !stats.positions + r.positions }
+
 (** [Ownership.event] -> upsertable row (dates as ISO strings). *)
 let event_row (e : Ownership.event) : Store.own_event_row =
   { Store.accession = e.accession
@@ -197,21 +217,20 @@ let ingest_13f ?force (store : Store.t) (job : job) : job_result Lwt.t =
     ; index_url = index.index_url }
   in
   (* A missing information table (rare) does not block the cover: the
-     filing is recorded with zero positions. *)
+     filing is recorded with zero positions. The filename is resolved from
+     the index page by [Edgar.info_table_url_of] ("infotable.xml" in real
+     filings); a 404 on it means "no positions". Only a 404 qualifies - any
+     other HTTP error (5xx/429/timeout) is re-raised so the filing counts as
+     failed instead of being dropped. *)
   let table_opt : string option Lwt.t =
-    Lwt.catch
-      (fun () ->
-        Edgar.get_document cfg (Edgar.info_table_url index)
-        >>= fun s -> Lwt.return (Some s))
-      (function
-        | Net.Http_error e when e.Net.status = 404 ->
-          (* The information table can legitimately be absent (or the pointer
-             in the cover stale): treat as "no positions". Only a 404
-             qualifies - any other HTTP error (5xx/429/timeout) is re-raised
-             so the filing counts as failed instead of being dropped. *)
-          Printf.eprintf "  %s: no information table (404)\n%!" index.accession;
-          Lwt.return None
-        | e -> Lwt.fail e)
+    Lwt.bind (Edgar.info_table_url_of cfg index) (fun url ->
+      Lwt.catch
+        (fun () -> Edgar.get_document cfg url >>= fun s -> Lwt.return (Some s))
+        (function
+          | Net.Http_error e when e.Net.status = 404 ->
+            Printf.eprintf "  %s: no information table (404)\n%!" index.accession;
+            Lwt.return None
+          | e -> Lwt.fail e))
   in
   Lwt.bind (Edgar.get_document cfg (Edgar.primary_xml_url index)) (fun cover_xml ->
     Lwt.bind table_opt (fun table ->
@@ -328,18 +347,8 @@ let ingest_day ?(force = false) (store : Store.t) (day : Date.t) : stats Lwt.t =
           | Some index ->
             if Config.forms_allow cfg index.form
             then
-              Lwt.bind (ingest_job_safe ~force store (make_job index)) (fun r ->
-                (match r with
-                 | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
-                 | Failed _ -> stats := { !stats with failed = !stats.failed + 1 }
-                 | Ingested r ->
-                   stats :=
-                     { !stats with
-                       docs = !stats.docs + 1;
-                       chunks = !stats.chunks + r.chunks;
-                       events = !stats.events + r.events;
-                       positions = !stats.positions + r.positions });
-                Lwt.return_unit)
+              Lwt.bind (ingest_job_safe ~force store (make_job index))
+                (fun r -> apply_result stats r; Lwt.return_unit)
             else (stats := { !stats with skipped = !stats.skipped + 1 }; Lwt.return_unit)))
       filings
     >>= fun () -> Lwt.return !stats)
@@ -476,6 +485,9 @@ let jobs_of_submissions (cfg : Config.t) (j : Yojson.Safe.t) : job list =
                   | _ -> None);
                primary_document = doc;
                primary_description = (match desc with `String s -> s | _ -> "");
+               (* the submissions JSON does not name the 13F information
+                  table; [Pipeline.ingest_13f] resolves it from the index page *)
+               info_table_document = None;
                index_url =
                  cfg.Config.sec_archives_base
                  ^ "/"
@@ -504,17 +516,7 @@ let ingest_cik ?limit ?(force = false) (store : Store.t) (cik : string) : stats 
     in
     Lwt_list.iter_s
       (fun job ->
-        Lwt.bind (ingest_job_safe ~force store job) (fun r ->
-          (match r with
-           | Skipped -> stats := { !stats with skipped = !stats.skipped + 1 }
-           | Failed _ -> stats := { !stats with failed = !stats.failed + 1 }
-           | Ingested r ->
-             stats :=
-               { !stats with
-                 docs = !stats.docs + 1;
-                 chunks = !stats.chunks + r.chunks;
-                 events = !stats.events + r.events;
-                 positions = !stats.positions + r.positions });
-          Lwt.return_unit))
+        Lwt.bind (ingest_job_safe ~force store job)
+          (fun r -> apply_result stats r; Lwt.return_unit))
       jobs
     >>= fun () -> Lwt.return !stats)

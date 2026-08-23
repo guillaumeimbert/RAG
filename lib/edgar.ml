@@ -33,6 +33,10 @@ type filing_index = {
   report_date : Date.t option;
   primary_document : string;
   primary_description : string;
+  info_table_document : string option;
+  (** the 13F information-table XML as named in the index's
+      "INFORMATION TABLE" row (e.g. "infotable.xml"); [None] when the index
+      lists no such document *)
   index_url : string;
   ticker : string;
   (** from the submissions JSON when available; "" otherwise *)
@@ -176,6 +180,9 @@ let master_of_day cfg (day : Date.t) : filing list Lwt.t =
 let strip_tags s =
   Re.replace_string (Re.compile (Re.Pcre.re "<[^>]*>")) ~by:"" s
 
+(** Form name as shown in the formName box ("Form SCHEDULE 13G", "Form
+    13F-HR", ...). The code itself may contain spaces ("SCHEDULE 13G", "SC
+    13D"), so capture everything up to the closing tag; the caller trims. *)
 let form_re =
   Re.compile
     Re.(seq [
@@ -185,9 +192,38 @@ let form_re =
          str "<strong>";
          Re.Pcre.re "[ \t\n]*";
          str "Form";
-         Re.Pcre.re " +";
-         group (Re.Pcre.re "[A-Za-z0-9/-]+");
+         Re.Pcre.re "[ \t]+";
+         group (Re.Pcre.re "[^<]+");
        ])
+
+(** [13F]/[13G]/[13D] (and their "SCHEDULE ..." / "SC ..." spellings). Their
+    structured data lives in a [*.xml] document that the index lists right
+    beside a [*.html] "friendly" twin under the SAME Type; prose filings
+    (10-K, 8-K, ...) have a single primary document. Used to pick the data
+    file in [parse_index] without importing the domain [Ownership] module
+    into this low-level parser. *)
+let is_ownership_form (form : string) : bool =
+  let s = String.trim form in
+  let s =
+    if Stringx.starts_with s ~prefix:"SCHEDULE "
+    then Stringx.drop_prefix s ~prefix:"SCHEDULE "
+    else s
+  in
+  let s =
+    if Stringx.starts_with s ~prefix:"SC "
+    then Stringx.drop_prefix s ~prefix:"SC "
+    else s
+  in
+  Stringx.starts_with s ~prefix:"13F"
+  || Stringx.starts_with s ~prefix:"13G"
+  || Stringx.starts_with s ~prefix:"13D"
+
+(** [head_opt l] = [Some (List.hd l)] or [None] if [l] is empty. (The
+    switch's standard library lacks [List.hd_opt]. *)
+let head_opt (l : 'a list) : 'a option =
+  match l with
+  | [] -> None
+  | x :: _ -> Some x
 
 let info_re field =
   Re.compile
@@ -240,7 +276,7 @@ let parse_index (filing : filing) (html : string) : filing_index option =
     | Some g -> Some (Re.Group.get g 1)
     | None -> None
   in
-  let form = get form_re in
+  let form = Option.map String.trim (get form_re) in
   let filed_at_s = get filing_date_re in
   let company_s = get company_re in
   match (form, filed_at_s, company_s) with
@@ -257,10 +293,41 @@ let parse_index (filing : filing) (html : string) : filing_index option =
         (fun s -> (try Some (Date.of_string s) with Stdlib.Failure _ -> None))
     in
     (* primary document = the row of the first table whose Type equals the
-       form; its Document cell links the .htm file. *)
+       form; its Document cell links the file. For ownership filings
+       (13F/13G/13D) the index lists the data .xml right beside a ".html"
+       friendly twin under the SAME Type; the structured data is the .xml,
+       so prefer it. Prose filings have a single primary document, so the
+       first match is used. *)
     let table = first_table html in
     let rows = Re.split row_re table in
+    let row_doc (row : string) : (string * string) option =
+      let cells =
+        List.map (fun g -> String.trim (strip_tags (Re.Group.get g 1)))
+          (Re.all cell_re row)
+      in
+      match cells with
+      | _seq :: _desc :: _doc :: typ :: _ when typ = form ->
+        (match Re.exec_opt doc_link_re row with
+         | Some g -> Some (String.trim (Re.Group.get g 1), _desc)
+         | None -> None)
+      | _ -> None
+    in
+    let matches = List.filter_map row_doc rows in
     let primary =
+      if is_ownership_form form
+      then
+        (* prefer the data .xml over the .html twin; fall back to the first
+           match if the index lists no .xml *)
+        (match List.find_opt (fun (doc, _desc) -> Stringx.ends_with doc ~suffix:".xml") matches with
+         | Some m -> Some m
+         | None -> head_opt matches)
+      else head_opt matches
+    in
+    (* 13F information table = the "INFORMATION TABLE" row whose document is
+       the .xml (the .html twin is styled output). Its filename varies
+       ("infotable.xml", "information_table.xml", ...), so take it from the
+       index rather than assuming one. *)
+    let info_table_doc =
       List.fold_left
         (fun acc row ->
           match acc with
@@ -271,9 +338,12 @@ let parse_index (filing : filing) (html : string) : filing_index option =
                 (Re.all cell_re row)
             in
             match cells with
-            | _seq :: _desc :: _doc :: typ :: _ when typ = form ->
+            | _seq :: _desc :: _ :: typ :: _
+              when String.uppercase_ascii typ = "INFORMATION TABLE" ->
               (match Re.exec_opt doc_link_re row with
-               | Some g -> Some (String.trim (Re.Group.get g 1), _desc)
+               | Some g ->
+                 let d = String.trim (Re.Group.get g 1) in
+                 if Stringx.ends_with d ~suffix:".xml" then Some d else None
                | None -> None)
             | _ -> None)
         None
@@ -292,6 +362,7 @@ let parse_index (filing : filing) (html : string) : filing_index option =
             report_date;
             primary_document = doc;
             primary_description = desc;
+            info_table_document = info_table_doc;
             index_url = filing.index_url;
             ticker = "";
           }
@@ -343,9 +414,36 @@ let doc_dir (fi : filing_index) : string =
     (13F-HR) and 0001045810-26-000062 (13G). *)
 let primary_xml_url (fi : filing_index) : string = accession_root fi ^ "primary_doc.xml"
 
-(** URL of the 13F information table (accession root; the [xsl.../]
-    variant is styled HTML). *)
-let info_table_url (fi : filing_index) : string = accession_root fi ^ "information_table.xml"
+(** URL of the 13F information table (accession root; the [xsl.../] variant
+    is styled HTML). The filename is taken from the index's "INFORMATION
+    TABLE" row when present ([fi.info_table_document]); real filings name it
+    "infotable.xml", so the conventional "information_table.xml" is only a
+    fallback (a 404 on it is treated upstream as "no positions"). *)
+let info_table_url (fi : filing_index) : string =
+  let doc = Option.value ~default:"information_table.xml" fi.info_table_document in
+  accession_root fi ^ doc
+
+(** Resolve the 13F information-table URL asynchronously. The day/master path
+    has already parsed the index, so [fi.info_table_document] is set and no
+    extra fetch happens. The per-CIK submissions path does not parse the index
+    page, so fetch + parse it here to learn the filename; a 404 or an
+    unparseable index falls back to [info_table_url] ("information_table.xml"). *)
+let info_table_url_of cfg (fi : filing_index) : string Lwt.t =
+  match fi.info_table_document with
+  | Some _ -> Lwt.return (info_table_url fi)
+  | None ->
+    let filing = { accession = fi.accession; cik = fi.cik; index_url = fi.index_url } in
+    Lwt.catch
+      (fun () ->
+        Lwt.map
+          (fun parsed ->
+            match parsed with
+            | Some p -> info_table_url p
+            | None -> info_table_url fi)
+          (filing_index_of cfg filing))
+      (function
+        | Net.Http_error e when e.status = 404 -> Lwt.return (info_table_url fi)
+        | e -> Lwt.fail e)
 
 (** Public index page of an accession number: the accession starts with
     the filer CIK (unpadded), which is the directory in the archives. *)

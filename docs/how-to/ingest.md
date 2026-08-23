@@ -26,8 +26,12 @@ ingest.exe ticker NVDA --limit 20
 ```
 
 The command prints a summary line (`docs=… chunks=… events=…
-positions=… skipped=… failed=…`). `skipped` counts filings already in
-the store — re-running the same command is safe and changes nothing.
+positions=… skipped=… failed=…`). `docs` counts only filings that
+actually persisted rows; `skipped` counts the rest — filings already in
+the store, filings outside `FORMS`, and jobs that persisted **zero** rows
+(for example a 13F whose information table does not exist, or a filing
+with no extractable text). Re-running the same command is safe and
+changes nothing.
 `failed` counts filings whose embedding or database write failed; the
 run exits non-zero when it is non-zero (nothing partial was stored —
 writes are transactional — so a re-run retries those filings).

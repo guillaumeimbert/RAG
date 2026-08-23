@@ -23,12 +23,12 @@ failure is a pipeline that "works" and writes garbage.
 
 ## The two layers
 
-**Unit tests** (`test/test*.ml`, 229 cases) run each module against
+**Unit tests** (`test/test*.ml`, 237 cases) run each module against
 **fixtures that are actual captured responses**, not synthetic ones:
-real EDGAR index pages (NVDA/AAPL 10-K), a real 8-K HTML filing, a
-real daily-index master file, a real submissions JSON, real 13G/13D/13F
-XML filings (NVDA→Nebius 13G, GameStop 13D, NVDA 13F cover +
-information table), `company_tickers.json`, and real OpenAI
+real EDGAR index pages (NVDA/AAPL 10-K, NVDA 13G and 13F), a real 8-K
+HTML filing, a real daily-index master file, a real submissions JSON,
+real 13G/13D/13F XML filings (NVDA→Nebius 13G, GameStop 13D, NVDA 13F
+cover + information table), `company_tickers.json`, and real OpenAI
 chat/embedding responses. A unit test passing means
 the parser still understands *that document, byte for byte, plus the
 documented variations*. The fixtures are the pin: if EDGAR changes
