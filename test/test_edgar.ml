@@ -142,9 +142,12 @@ let tests : (string * unit T.test_case list) list =
                first space ("SCHEDULE") and dropped the whole filing. *)
             T.check T.string "form" "SCHEDULE 13G" fi.Edgar.form;
             T.check (T.option T.string) "info table" None fi.Edgar.info_table_document;
-            (* the index lists a .html twin first, but the data is the .xml; the
-               parser must pick the .xml, not the .html. *)
-            T.check T.string "primary document" "primary_doc.xml" fi.Edgar.primary_document;
+            (* the index lists a .html twin first, but the data is the .xml;
+               the parser must pick the .xml, not the .html. The data file is
+               given a NON-STANDARD name ("own13g.xml", not the conventional
+               "primary_doc.xml") so the test proves the pipeline fetches the
+               document the index names rather than a hardcoded filename. *)
+            T.check T.string "primary document" "own13g.xml" fi.Edgar.primary_document;
             T.check T.string "company" "NVIDIA CORP" fi.Edgar.company);
         T.test_case "13F index page (information table filename from the index)" `Quick (fun () ->
             let filing =
@@ -159,9 +162,11 @@ let tests : (string * unit T.test_case list) list =
               | Some fi -> fi
               | None -> raise (Edgar.Failure "parse failed")
             in
-            (* the information table is named in the index ("infotable.xml"),
-               not the assumed "information_table.xml"; the .html twin is not
-               the data file. *)
+            (* Representative fixture: the real EDGAR structure and accession,
+               but the information table is named "infotable.xml" (not the
+               real "information_table.xml" for this accession) to prove the
+               name is read from the index, not assumed; the .html twin is
+               not the data file. *)
             T.check T.string "form" "13F-HR" fi.Edgar.form;
             T.check (T.option T.string) "info table" (Some "infotable.xml") fi.Edgar.info_table_document;
             (* the .html twin is listed first; the data is the .xml. *)
@@ -225,6 +230,44 @@ let tests : (string * unit T.test_case list) list =
                 ticker = "NVDA";
               } in
             T.check T.string "mismatch" "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000065/information_table.xml" (Edgar.info_table_url fi));
+      ] );
+    (
+      "primary_xml_url",
+      [
+        T.test_case "uses the data document the index names, not a hardcoded primary_doc.xml" `Quick (fun () ->
+            let fi =
+              {
+                Edgar.accession = "0001045810-26-000062";
+                cik = "1045810";
+                company = "NVIDIA CORP";
+                form = "SCHEDULE 13G";
+                filed_at = Date.of_string "2026-08-20";
+                report_date = Some (Date.of_string "2026-06-30");
+                primary_document = "own13g.xml";
+                primary_description = "SCHEDULE 13G";
+                info_table_document = None;
+                index_url =
+                  "https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000062-index.htm";
+                ticker = "NVDA";
+              } in
+            T.check T.string "nonstandard name" "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000062/own13g.xml" (Edgar.primary_xml_url fi));
+        T.test_case "conventional primary_doc.xml name" `Quick (fun () ->
+            let fi =
+              {
+                Edgar.accession = "0001045810-26-000062";
+                cik = "1045810";
+                company = "NVIDIA CORP";
+                form = "SCHEDULE 13G";
+                filed_at = Date.of_string "2026-08-20";
+                report_date = Some (Date.of_string "2026-06-30");
+                primary_document = "primary_doc.xml";
+                primary_description = "SCHEDULE 13G";
+                info_table_document = None;
+                index_url =
+                  "https://www.sec.gov/Archives/edgar/data/1045810/0001045810-26-000062-index.htm";
+                ticker = "NVDA";
+              } in
+            T.check T.string "conventional name" "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000062/primary_doc.xml" (Edgar.primary_xml_url fi));
       ] );
     (
       "master_url",

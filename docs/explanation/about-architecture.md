@@ -93,7 +93,9 @@ Full argument and limits: [About heterogeneous retrieval](about-heterogeneous-re
 - **The in-process mock servers** (`test/mock.ml`) exist because the
   e2e test must be airtight and offline: the exact same pipeline code
   runs against fixtures that are *actual captured SEC and OpenAI
-  responses*, so "the tests pass" means "the wire formats are still
+  responses* (a few — the ownership index pages — are representative
+  variants; see [About the test suite](about-testing.md)), so "the
+  tests pass" means "the wire formats are still
   what we expect". See [About the test suite](about-testing.md).
 
 ## Where things are

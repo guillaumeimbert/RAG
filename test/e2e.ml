@@ -112,29 +112,36 @@ let drain_index_requests () =
   Mutex.unlock edgar_index_mu;
   xs
 
-(** [find_sub s sub] = index of the first occurrence of [sub] in [s]. *)
-let find_sub (s : string) (sub : string) : int option =
-  let n = String.length sub in
-  if n = 0 || String.length s < n then None
-  else
-    let i = ref 0 in
-    let r = ref None in
-    while !i + n <= String.length s && Option.is_none !r do
-      if String.sub s !i n = sub then r := Some !i else incr i
-    done;
-    !r
-
-(** Rewrite the single vector(N) column declaration in the schema to vector(dim). *)
+(** Rewrite every vector(N) / halfvec(N) type in the schema to use [dim], so
+    the schema (written for the 2560-dim reference model) runs against the
+    tiny e2e embedding dimension. Bare numbers in comments or limits
+    (e.g. "2560", "<= 4000") are left untouched. *)
 let rewrite_dim (dim : int) (sql : string) =
-  let start_i =
-    (match find_sub sql "vector(" with
-     | Some i -> i
-     | None -> failwith "vector( not found in schema")
+  let dim_s = Printf.sprintf "%d" dim in
+  let starts_with (k : string) (i : int) : bool =
+    let n = String.length k in
+    i + n <= String.length sql && String.sub sql i n = k
   in
-  let close_i = String.index_from sql start_i ')' in
-  String.sub sql 0 start_i
-  ^ Printf.sprintf "vector(%d)" dim
-  ^ String.sub sql (close_i + 1) (String.length sql - close_i - 1)
+  let rec scan (i : int) (buf : Buffer.t) : string =
+    if i >= String.length sql then Buffer.contents buf
+    else
+      let kind =
+        if starts_with "halfvec(" i then Some "halfvec("
+        else if starts_with "vector(" i then Some "vector("
+        else None
+      in
+      (match kind with
+       | None ->
+         Buffer.add_char buf sql.[i];
+         scan (i + 1) buf
+       | Some k ->
+         let close_i = String.index_from sql i ')' in
+         Buffer.add_string buf k;
+         Buffer.add_string buf dim_s;
+         Buffer.add_char buf ')';
+         scan (close_i + 1) buf)
+  in
+  scan 0 (Buffer.create (String.length sql + 128))
 
 (** Deterministic mock embedding: one 8-dim vector per input text. *)
 let mock_vector (s : string) : float list =
@@ -255,8 +262,14 @@ let edgar_handler_ok (path : string) (_body : string) : Mock.resp option =
     xml (fixture "13f_nvda_primary.xml")
   | "/Archives/edgar/data/1045810/000104581026000065/infotable.xml" ->
     xml (fixture "13f_nvda_table.xml")
-  | "/Archives/edgar/data/1045810/000104581026000062/primary_doc.xml" ->
+  | "/Archives/edgar/data/1045810/000104581026000062/own13g.xml" ->
     xml (fixture "13g_nvda.xml")
+  (* malformed 13F information table (7m): a valid cover plus a well-formed
+     but schema-invalid table (no <infoTable> rows) -> Failed, not skipped *)
+  | "/Archives/edgar/data/1045810/000104581026000094/primary_doc.xml" ->
+    xml (fixture "13f_nvda_primary.xml")
+  | "/Archives/edgar/data/1045810/000104581026000094/badtable.xml" ->
+    xml (fixture "13f_bad_table.xml")
   | "/submissions/CIK0001045810.json" ->
     Some { Mock.code = 200; content_type = "application/json"; body = fixture "nvda_submissions.json" }
   | "/files/company_tickers.json" ->
@@ -324,9 +337,11 @@ let () =
       in
       let schema2 = Test_fixtures.read_text (Test_fixtures.schema_file "0002_ownership.sql") in
       let schema3 = Test_fixtures.read_text (Test_fixtures.schema_file "0003_chunk_quality.sql") in
+      let schema4 = Test_fixtures.read_text (Test_fixtures.schema_file "0004_halfvec_hnsw.sql") in
       pg_exec scratch_db schema;
       pg_exec scratch_db schema2;
       pg_exec scratch_db schema3;
+      pg_exec scratch_db schema4;
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;
 
       (* Make 429/5xx retry loops (fault injection) finish instantly. *)
@@ -623,6 +638,75 @@ let () =
            && b.Store.is_amendment
          | _ -> false);
 
+      (* 4f. halfvec HNSW index: at 2560 dims pgvector's HNSW cannot index the
+         full-precision vector column (2000-dim cap), so the schema keeps that
+         column for exact reranking AND adds a half-precision mirror
+         [embedding_hv] which carries the HNSW index. Verify (a) the mirror +
+         index exist, (b) candidate retrieval uses the index (Index Scan when
+         seqscan is disabled), and (c) the 0004 migration back-fills both onto
+         an old-style database that lacks the mirror. *)
+      let in_str (s : string) (sub : string) : bool =
+        let n = String.length sub in
+        if n = 0 then true
+        else
+          let i = ref 0 and r = ref false in
+          while !i + n <= String.length s && not !r do
+            if String.sub s !i n = sub then r := true else incr i
+          done;
+          !r
+      in
+      let is_one (rows : string list list) : bool =
+        (match rows with [ ["1"] ] -> true | _ -> false)
+      in
+      check "halfvec: embedding_hv generated column present"
+        (is_one (pg_query scratch_db
+             "SELECT count(*)::int FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding_hv'"));
+      let idx_def =
+        (match pg_query scratch_db "SELECT indexdef FROM pg_indexes WHERE indexname = 'chunks_embedding_hnsw'" with
+         | [ [d] ] -> d
+         | _ -> "")
+      in
+      check "halfvec: HNSW index targets the halfvec mirror (cosine ops)"
+        (in_str idx_def "hnsw" && in_str idx_def "embedding_hv" && in_str idx_def "halfvec_cosine_ops");
+      let qhv = "[" ^ (String.concat "," (List.init embed_dim (fun _ -> "0"))) ^ "]" in
+      let plan =
+        String.concat " "
+          (List.concat
+             (pg_query scratch_db
+                (Printf.sprintf
+                   "SET enable_seqscan = off; EXPLAIN (COSTS OFF) SELECT id FROM chunks ORDER BY embedding_hv <=> '%s'::halfvec LIMIT 5"
+                   qhv)))
+      in
+      check "halfvec: candidate retrieval uses the HNSW index (Index Scan)"
+        (in_str plan "Index Scan" && in_str plan "chunks_embedding_hnsw");
+      (* 0004 migration: an old-style database (embedding column, no mirror)
+         gains the mirror + index when 0004 is applied. *)
+      let hv_db = "raguesslighter_e2e_hv" in
+      let old_chunks_ddl =
+        Printf.sprintf
+          "CREATE TABLE chunks (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, doc_id TEXT NOT NULL, company TEXT NOT NULL, cik TEXT NOT NULL, ticker TEXT, form TEXT NOT NULL, filed_at DATE NOT NULL, section TEXT, chunk_index INT NOT NULL, text TEXT NOT NULL, embedding vector(%d) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (doc_id, chunk_index))"
+          embed_dim
+      in
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ hv_db ^ ";");
+      pg_exec pg_main_db ("CREATE DATABASE " ^ hv_db ^ ";");
+      pg_exec hv_db "CREATE EXTENSION IF NOT EXISTS vector;";
+      pg_exec hv_db old_chunks_ddl;
+      check "halfvec: old-style DB lacks the mirror before 0004"
+        (not (is_one (pg_query hv_db
+             "SELECT count(*)::int FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding_hv'")));
+      pg_exec hv_db (Test_fixtures.read_text (Test_fixtures.schema_file "0004_halfvec_hnsw.sql"));
+      check "halfvec: 0004 adds the mirror to an old-style DB"
+        (is_one (pg_query hv_db
+             "SELECT count(*)::int FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding_hv'"));
+      let hv_idx =
+        (match pg_query hv_db "SELECT indexdef FROM pg_indexes WHERE indexname = 'chunks_embedding_hnsw'" with
+         | [ [d] ] -> d
+         | _ -> "")
+      in
+      check "halfvec: 0004 creates the HNSW index on the mirror"
+        (in_str hv_idx "hnsw" && in_str hv_idx "embedding_hv");
+      pg_exec pg_main_db ("DROP DATABASE IF EXISTS " ^ hv_db ^ ";");
+
       (* 5. ticker resolution *)
       let nvda = Lwt_main.run (Edgar.cik_of_ticker cfg "NVDA") in
       check "cik_of_ticker: NVDA" (nvda = Some "0001045810");
@@ -914,6 +998,33 @@ let () =
       check "force 13gd: zero-row re-ingest clears events and chunks"
         (count_where "ownership_events" gdoc = 0 && count_where "chunks" gdoc = 0);
 
+      (* 7m. malformed 13F information table: a downloaded NONEMPTY table that
+         is well-formed XML but carries no <infoTable> rows (truncated or
+         schema-invalid) must be Failed, not a benign "empty holdings" skip.
+         The documented 404 case (no table at all) remains a skip; only a
+         table that was actually fetched yet parsed to zero rows fails. *)
+      let badtable_index =
+        {
+          Edgar.accession = "0001045810-26-000094";
+          cik = "1045810";
+          company = "NVIDIA CORP";
+          form = "13F-HR";
+          filed_at = Date.of_string "2026-09-01";
+          report_date = None;
+          primary_document = "primary_doc.xml";
+          primary_description = "";
+          info_table_document = Some "badtable.xml";
+          index_url =
+            edgar_base ^ "/Archives/edgar/data/1045810/0001045810-26-000094-index.htm";
+          ticker = "NVDA";
+        }
+      in
+      let rbad = Lwt_main.run (Pipeline.ingest_job_safe store (Pipeline.make_job badtable_index)) in
+      check "malformed 13F table: classified as Failed"
+        (match rbad with Pipeline.Failed _ -> true | _ -> false);
+      check "malformed 13F table: no holdings stored"
+        (count_where "holdings" "0001045810-26-000094" = 0);
+
       (* 8. chunk quality / data integrity: every stored chunk is nonempty,
          within the chunker's size limit, and free of internal section markers
          and leaked HTML markup; the database itself rejects empty/whitespace
@@ -976,9 +1087,11 @@ let () =
           in
           let schema2 = Test_fixtures.read_text (Test_fixtures.schema_file "0002_ownership.sql") in
           let schema3 = Test_fixtures.read_text (Test_fixtures.schema_file "0003_chunk_quality.sql") in
+          let schema4 = Test_fixtures.read_text (Test_fixtures.schema_file "0004_halfvec_hnsw.sql") in
           pg_exec cli_db schema;
           pg_exec cli_db schema2;
-          pg_exec cli_db schema3
+          pg_exec cli_db schema3;
+          pg_exec cli_db schema4
         in
         let env_file = Filename.temp_file "rag_e2e_env" ".env" in
         let () =

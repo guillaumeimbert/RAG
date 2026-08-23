@@ -407,12 +407,15 @@ let doc_dir (fi : filing_index) : string =
 
 (** URL of the raw XML data document of an ownership filing.
 
-    Modern 13F-HR / 13G / 13D filings carry their machine-readable data XML
-    at the accession root as [primary_doc.xml]; the XSL-rendered variant
-    listed as primaryDocument ([xsl.../primary_doc.xml]) is styled HTML, not
-    data. Live-verified 2026-07 against accessions 0001045810-26-000065
-    (13F-HR) and 0001045810-26-000062 (13G). *)
-let primary_xml_url (fi : filing_index) : string = accession_root fi ^ "primary_doc.xml"
+    The document name is the one the index page selected for the primary
+    document ([fi.primary_document], a bare file name such as
+    "primary_doc.xml"). The XSL-rendered variant listed by the submissions
+    API ([xsl.../primary_doc.xml]) is styled HTML, not data, and is never
+    fetched (see [resolve_ownership_index], which replaces that path with
+    the index-named data document before it is used). Live-verified
+    2026-08 against NVDA accessions 0001045810-26-000065 (13F-HR) and
+    0001045810-26-000062 (13G). *)
+let primary_xml_url (fi : filing_index) : string = accession_root fi ^ fi.primary_document
 
 (** URL of the 13F information table (accession root; the [xsl.../] variant
     is styled HTML). The filename is taken from the index's "INFORMATION
@@ -443,6 +446,41 @@ let info_table_url_of cfg (fi : filing_index) : string Lwt.t =
           (filing_index_of cfg filing))
       (function
         | Net.Http_error e when e.status = 404 -> Lwt.return (info_table_url fi)
+        | e -> Lwt.fail e)
+
+(** Ensure [fi.primary_document] names the data document at the accession
+    root (a bare file name), not the XSL-rendered HTML path listed by the
+    submissions API.
+
+    The master/day path parses the index page, so [fi.primary_document] is
+    already the bare data document and this is a no-op. The per-CIK
+    submissions path stores the submissions API's [primaryDocument]
+    (e.g. "xslForm13F_X02/primary_doc.xml"), which is an HTML path (it
+    contains a "/") — verified 2026-08: that file is a <html> document, not
+    the data XML. Detect that and fetch + parse the index page to learn the
+    real data document name (and, for 13F, the information-table name). On a
+    404 or an unparseable index, fall back to the conventional
+    "primary_doc.xml" so a missing index does not mask the data document. *)
+let resolve_ownership_index cfg (fi : filing_index) : filing_index Lwt.t =
+  if not (String.contains fi.primary_document '/')
+  then Lwt.return fi
+  else
+    let fallback = { fi with primary_document = "primary_doc.xml" } in
+    let filing =
+      { accession = fi.accession; cik = fi.cik; index_url = fi.index_url }
+    in
+    Lwt.catch
+      (fun () ->
+        Lwt.bind (filing_index_of cfg filing) (fun parsed ->
+          match parsed with
+          | Some p ->
+            Lwt.return
+              { fi with
+                primary_document = p.primary_document;
+                info_table_document = p.info_table_document }
+          | None -> Lwt.return fallback))
+      (function
+        | Net.Http_error e when e.status = 404 -> Lwt.return fallback
         | e -> Lwt.fail e)
 
 (** Public index page of an accession number: the accession starts with

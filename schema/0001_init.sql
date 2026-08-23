@@ -22,24 +22,35 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index  INT    NOT NULL,
     text         TEXT   NOT NULL,
     embedding    vector(2560) NOT NULL,
+    -- Half-precision mirror of [embedding], created for the HNSW index
+    -- below. pgvector's HNSW caps [vector] at 2000 dims but [halfvec] at
+    -- 4000, so a 2560-dim stack (qwen3-embedding-4b) cannot index the
+    -- full-precision column directly; it indexes this mirror instead.
+    -- Full precision is kept in [embedding] so search can rerank the
+    -- index's candidates exactly. Update BOTH dimensions together with
+    -- EMBEDDING_DIM.
+    embedding_hv halfvec(2560) GENERATED ALWAYS AS (embedding::halfvec) STORED,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     UNIQUE (doc_id, chunk_index)
 );
 
--- ANN index: cosine similarity. pgvector's HNSW supports at most 2000
--- dimensions; above that (e.g. qwen3-embedding-4b at 2560) create it only
--- when legal, otherwise fall back to sequential scan (fine at this scale).
+-- ANN index: cosine similarity over the half-precision mirror. pgvector's
+-- HNSW caps [vector] at 2000 dims but [halfvec] at 4000; the reference
+-- stack (2560) falls in between, so only the halfvec mirror is indexable.
+-- Candidate retrieval uses this index (fast); the search query then reranks
+-- the candidates with the full-precision [embedding] (exact). When the
+-- dimension exceeds the halfvec HNSW limit, fall back to a sequential scan.
 DO $$
 BEGIN
     IF (SELECT atttypmod
           FROM pg_attribute
-         WHERE attrelid = 'chunks'::regclass AND attname = 'embedding') <= 2000
+         WHERE attrelid = 'chunks'::regclass AND attname = 'embedding') <= 4000
     THEN
         EXECUTE 'CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
-                   ON chunks USING hnsw (embedding vector_cosine_ops)';
+                   ON chunks USING hnsw (embedding_hv halfvec_cosine_ops)';
     ELSE
-        RAISE NOTICE 'embedding dimension > 2000: skipping HNSW index (pgvector limit)';
+        RAISE NOTICE 'embedding dimension > 4000: skipping HNSW index (pgvector halfvec limit)';
     END IF;
 END $$;
 

@@ -37,7 +37,7 @@ flowchart TD
     end
 
     subgraph DB["PostgreSQL 17 + pgvector"]
-        chunks[("chunks<br/>vector(2560) + HNSW")]
+        chunks[("chunks<br/>vector(2560) + halfvec mirror + HNSW")]
         events[("ownership_events<br/>13G / 13D")]
         holdings[("holdings<br/>13F positions")]
     end
@@ -126,7 +126,7 @@ bin/    ingest.exe, query.exe (cmdliner CLIs)
 lib/    config, net, gz, date, edgar (discovery + parsing), html_text,
        chunk, openai, json, xml (minimal XML walker), ownership
        (13G/13D/13F parsers), store (pgvector), pipeline
-schema/ 0001_init.sql (chunks + HNSW), 0002_ownership.sql
+schema/ 0001_init.sql (chunks + halfvec HNSW), 0002_ownership.sql, 0003/0004
 test/   unit + e2e tests, mock HTTP servers, captured fixtures/
 docs/   Diátaxis docs: tutorials/, how-to/, reference/, explanation/, adr/
 vendor/ vendored SQL-query ppx (rapper)
@@ -137,7 +137,7 @@ vendor/ vendored SQL-query ppx (rapper)
 - **SEC fair access**: static `SEC_USER_AGENT` with contact info,
   ≤ 10 req/s, no API key.
 - **Embedding dimension**: `EMBEDDING_DIM` must match the
-  `vector(N)` column in `schema/0001_init.sql` (2560 =
-  qwen3-embedding-4b; HNSW only when N ≤ 2000).
+  `vector(N)` / `halfvec(N)` columns in `schema/0001_init.sql` (2560 =
+  qwen3-embedding-4b; HNSW on the half-precision mirror when N ≤ 4000).
 - **No in-process models**: inference is entirely behind
   `OPENAI_BASE_URL`; swapping servers changes one line in `.env`.

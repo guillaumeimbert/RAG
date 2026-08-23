@@ -75,6 +75,10 @@ default base URLs from
     `.xml` right beside a `.html` "friendly" twin under the **same Type**;
     the app selects the `.xml` row (the raw data at the accession root) and
     fetches that, not the `.html` (whose link is styled `xsl…/` output).
+    The file name is the one the index itself names — not a hardcoded
+    `primary_doc.xml` — and on the per-CIK (submissions) path, where the
+    submissions API reports an XSL path instead, the app re-resolves it from
+    the index page before fetching.
   - **13F information table**: the 13F-HR holdings table, listed on the
     index as the `INFORMATION TABLE` document. Its file name varies by
     filer (e.g. `infotable.xml`), so the app reads the name from the index

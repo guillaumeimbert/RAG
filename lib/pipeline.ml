@@ -179,97 +179,114 @@ let ingest_prose_filing ?force (store : Store.t) (job : job) : job_result Lwt.t 
     the whole filing instead of finding it "already ingested". *)
 let ingest_13gd ?force (store : Store.t) (job : job) : job_result Lwt.t =
   let cfg = store.Store.cfg in
-  let index = job.index in
-  let meta =
-    { Ownership.accession = index.accession
-    ; filed_at = index.filed_at
-    ; index_url = index.index_url }
-  in
-  Lwt.bind (Edgar.get_document cfg (Edgar.primary_xml_url index)) (fun xml ->
-    let (events, prose) =
-      (match Ownership.classify index.form with
-       | Ownership.Form13d -> Ownership.parse_13d xml ~meta ~form:index.form
-       | _ -> Ownership.parse_13g xml ~meta ~form:index.form)
+  Lwt.bind (Edgar.resolve_ownership_index cfg job.index) (fun index ->
+    let meta =
+      { Ownership.accession = index.accession
+      ; filed_at = index.filed_at
+      ; index_url = index.index_url }
     in
-    let ev_rows = List.map event_row events in
-    let embedded : (Chunk.block * float list) list Lwt.t =
-      if prose = ""
-      then Lwt.return []
-      else
-        embed_blocks store
-          [{ Chunk.section = Ownership.norm_form index.form ^ " — items & comments";
-             text = prose }]
-    in
-    Lwt.bind embedded (fun emb ->
-      let ch_rows = chunk_rows index emb in
-      Lwt.bind (Store.upsert_13gd ?force store index.accession ev_rows ch_rows) (fun () ->
-        Lwt.return (Ingested { chunks = List.length ch_rows; events = List.length ev_rows; positions = 0 }))))
+    Lwt.bind (Edgar.get_document cfg (Edgar.primary_xml_url index)) (fun xml ->
+      let (events, prose) =
+        (match Ownership.classify index.form with
+         | Ownership.Form13d -> Ownership.parse_13d xml ~meta ~form:index.form
+         | _ -> Ownership.parse_13g xml ~meta ~form:index.form)
+      in
+      let ev_rows = List.map event_row events in
+      let embedded : (Chunk.block * float list) list Lwt.t =
+        if prose = ""
+        then Lwt.return []
+        else
+          embed_blocks store
+            [{ Chunk.section = Ownership.norm_form index.form ^ " — items & comments";
+               text = prose }]
+      in
+      Lwt.bind embedded (fun emb ->
+        let ch_rows = chunk_rows index emb in
+        Lwt.bind (Store.upsert_13gd ?force store index.accession ev_rows ch_rows) (fun () ->
+          Lwt.return (Ingested { chunks = List.length ch_rows; events = List.length ev_rows; positions = 0 })))))
 
 (** 13F-HR: raw XML -> structured holdings. Issuer CIKs are resolved
     best-effort against the company-tickers file; unresolved issuers keep
     an empty CIK and remain queryable by name. *)
 let ingest_13f ?force (store : Store.t) (job : job) : job_result Lwt.t =
   let cfg = store.Store.cfg in
-  let index = job.index in
-  let meta =
-    { Ownership.accession = index.accession
-    ; filed_at = index.filed_at
-    ; index_url = index.index_url }
-  in
-  (* A missing information table (rare) does not block the cover: the
-     filing is recorded with zero positions. The filename is resolved from
-     the index page by [Edgar.info_table_url_of] ("infotable.xml" in real
-     filings); a 404 on it means "no positions". Only a 404 qualifies - any
-     other HTTP error (5xx/429/timeout) is re-raised so the filing counts as
-     failed instead of being dropped. *)
-  let table_opt : string option Lwt.t =
-    Lwt.bind (Edgar.info_table_url_of cfg index) (fun url ->
-      Lwt.catch
-        (fun () -> Edgar.get_document cfg url >>= fun s -> Lwt.return (Some s))
-        (function
-          | Net.Http_error e when e.Net.status = 404 ->
-            Printf.eprintf "  %s: no information table (404)\n%!" index.accession;
-            Lwt.return None
-          | e -> Lwt.fail e))
-  in
-  Lwt.bind (Edgar.get_document cfg (Edgar.primary_xml_url index)) (fun cover_xml ->
-    Lwt.bind table_opt (fun table ->
-      let t13f = Ownership.parse_13f cover_xml ~meta ~form:index.form table in
-      let resolve (name : string) : string Lwt.t =
-        if name = ""
-        then Lwt.return ""
-        else
-          Lwt.bind (Edgar.resolve cfg name) (function
-            | Some c -> Lwt.return c
-            | None ->
-              Printf.eprintf "  %s: issuer not resolved: %s\n%!" index.accession name;
-              Lwt.return "")
-      in
-      Lwt_list.map_s resolve (List.map (fun (p : Ownership.position) -> p.issuer_name) t13f.positions)
-      >>= fun ciks ->
-      let rows =
-        List.map2
-          (fun (p : Ownership.position) (cik : string) ->
-            { Store.accession = index.accession
-            ; filer_cik = t13f.filer_cik
-            ; filer_name = t13f.filer_name
-            ; period = Date.to_string t13f.period
-            ; filed_at = Date.to_string index.filed_at
-            ; issuer_name = p.issuer_name
-            ; issuer_cusip = p.issuer_cusip
-            ; issuer_cik = cik
-            ; class_name = p.class_name
-            ; value_usd = p.value_usd
-            ; shares = p.shares
-            ; prnamt_type = p.prnamt_type
-            ; discretion = p.discretion
-            ; vote_sole = p.vote_sole
-            ; vote_shared = p.vote_shared
-            ; vote_none = p.vote_none })
-          t13f.positions ciks
-      in
-      Lwt.bind (Store.upsert_holdings ?force store index.accession rows) (fun () ->
-        Lwt.return (Ingested { chunks = 0; events = 0; positions = List.length rows }))))
+  Lwt.bind (Edgar.resolve_ownership_index cfg job.index) (fun index ->
+    let meta =
+      { Ownership.accession = index.accession
+      ; filed_at = index.filed_at
+      ; index_url = index.index_url }
+    in
+    (* A missing information table (rare) does not block the cover: the
+       filing is recorded with zero positions. The filename is resolved from
+       the index page by [Edgar.info_table_url_of] ("infotable.xml" in real
+       filings); a 404 on it means "no positions". Only a 404 qualifies - any
+       other HTTP error (5xx/429/timeout) is re-raised so the filing counts as
+       failed instead of being dropped. *)
+    let table_opt : string option Lwt.t =
+      Lwt.bind (Edgar.info_table_url_of cfg index) (fun url ->
+        Lwt.catch
+          (fun () -> Edgar.get_document cfg url >>= fun s -> Lwt.return (Some s))
+          (function
+            | Net.Http_error e when e.Net.status = 404 ->
+              Printf.eprintf "  %s: no information table (404)\n%!" index.accession;
+              Lwt.return None
+            | e -> Lwt.fail e))
+    in
+    Lwt.bind (Edgar.get_document cfg (Edgar.primary_xml_url index)) (fun cover_xml ->
+      Lwt.bind table_opt (fun table ->
+        let t13f = Ownership.parse_13f cover_xml ~meta ~form:index.form table in
+        (* A 404 information table ([table = None]) is the documented
+           "no positions" case: the cover is recorded with zero holdings.
+           A table that was actually downloaded but yields zero positions
+           is truncated or schema-invalid, and treating it as empty would
+           hide a broken filing, so fail loudly (a re-run retries once the
+           upstream is fixed). An empty or whitespace-only body counts as
+           "no table". A genuinely empty holdings list is impossible in
+           practice: a 13F is filed to disclose at least one holding. *)
+        (match table with
+         | None -> ()
+         | Some t ->
+           if String.trim t = "" || List.length t13f.positions > 0 then ()
+           else
+             failwith
+               (Printf.sprintf
+                  "13F %s: information table downloaded but parsed to zero positions (truncated or schema-invalid)"
+                  index.accession));
+        let resolve (name : string) : string Lwt.t =
+          if name = ""
+          then Lwt.return ""
+          else
+            Lwt.bind (Edgar.resolve cfg name) (function
+              | Some c -> Lwt.return c
+              | None ->
+                Printf.eprintf "  %s: issuer not resolved: %s\n%!" index.accession name;
+                Lwt.return "")
+        in
+        Lwt_list.map_s resolve (List.map (fun (p : Ownership.position) -> p.issuer_name) t13f.positions)
+        >>= fun ciks ->
+        let rows =
+          List.map2
+            (fun (p : Ownership.position) (cik : string) ->
+              { Store.accession = index.accession
+              ; filer_cik = t13f.filer_cik
+              ; filer_name = t13f.filer_name
+              ; period = Date.to_string t13f.period
+              ; filed_at = Date.to_string index.filed_at
+              ; issuer_name = p.issuer_name
+              ; issuer_cusip = p.issuer_cusip
+              ; issuer_cik = cik
+              ; class_name = p.class_name
+              ; value_usd = p.value_usd
+              ; shares = p.shares
+              ; prnamt_type = p.prnamt_type
+              ; discretion = p.discretion
+              ; vote_sole = p.vote_sole
+              ; vote_shared = p.vote_shared
+              ; vote_none = p.vote_none })
+            t13f.positions ciks
+        in
+        Lwt.bind (Store.upsert_holdings ?force store index.accession rows) (fun () ->
+          Lwt.return (Ingested { chunks = 0; events = 0; positions = List.length rows })))))
 
 (** Route one filing to its pipeline by form class. *)
 let ingest_job ?(force = false) (store : Store.t) (job : job) : job_result Lwt.t =

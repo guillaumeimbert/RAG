@@ -103,11 +103,16 @@ type hit = {
   similarity : float;
 }
 
-(** Vector search. The inner query does the index-friendly nearest-neighbour
-    work (ORDER BY distance LIMIT top_k); the outer query then drops any hit
-    whose cosine similarity falls below [min_similarity], so a nonsense or
-    unrelated query returns NOTHING rather than the nearest top_k however bad
-    they are.
+(** Vector search, two-stage. The inner query retrieves the candidate set
+    with the half-precision HNSW index ([ORDER BY embedding_hv <=> q::halfvec
+    LIMIT top_k]): pgvector's HNSW caps [vector] at 2000 dims but [halfvec] at
+    4000, so at 2560 dims only the halfvec mirror is indexable, and the index
+    makes candidate retrieval fast (an Index Scan instead of a sequential
+    scan). The inner query nonetheless computes the similarity from the
+    FULL-precision [embedding] column, and the outer query reorders the
+    candidates by that exact similarity and drops any whose cosine similarity
+    falls below [min_similarity], so a nonsense or unrelated query returns
+    NOTHING rather than the nearest top_k however bad they are.
 
     [min_similarity] = 0.0 DISABLES the filter: cosine similarity ranges over
     [-1, 1], so a plain `similarity >= 0.0` would silently drop every
@@ -145,7 +150,7 @@ let search_q =
         WHERE ('' = %string{cik} OR cik = %string{cik})
           AND ('' = %string{form} OR form = %string{form})
           AND ('' = %string{ticker} OR ticker = %string{ticker})
-        ORDER BY embedding <=> %string{q}::vector
+        ORDER BY embedding_hv <=> %string{q}::halfvec
         LIMIT %int{top_k}
       ) ranked
       WHERE (%float{min_similarity} = 0.0

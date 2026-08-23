@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Malformed 13F information table: well-formed XML (so it parses) but with
+     no <infoTable> rows - a truncated or schema-invalid table. The pipeline
+     must treat this as a Failed filing, not as an empty holdings list. -->
+<formData>
+  <summaryPage>
+    <tableValueTotal>15000000</tableValueTotal>
+  </summaryPage>
+</formData>

@@ -55,6 +55,15 @@ podman compose exec -T db psql -U raguesslighter -d raguesslighter \
 `[^[:space:]]` regex, so the command above converges on the right
 constraint either way.)
 
+`0004_halfvec_hnsw.sql` likewise converges: it adds the half-precision
+`embedding_hv` mirror (if absent) and (re)creates the HNSW index on it,
+so an existing store gains the halfvec index without a re-ingest:
+
+```sh
+podman compose exec -T db psql -U raguesslighter -d raguesslighter \
+  < schema/0004_halfvec_hnsw.sql
+```
+
 ## Reset the store
 
 Dropping the tables keeps the database; re-ingest to repopulate:
@@ -83,11 +92,16 @@ This cannot be done with `ALTER` in place. Steps:
 
 1. Stop ingesting.
 2. Update `EMBEDDING_DIM` (and `EMBEDDING_MODEL`) in `.env`.
-3. Update the `vector(N)` literal in `schema/0001_init.sql` to match.
-4. Reset the store (above) so the `chunks` column is recreated at the
+3. Update the `vector(N)` and `halfvec(N)` literals in
+   `schema/0001_init.sql` and the `halfvec(N)` literal in
+   `schema/0004_halfvec_hnsw.sql` to match.
+4. Reset the store (above) so the `chunks` columns are recreated at the
    new dimension.
 5. Re-ingest.
 
-Note: pgvector's HNSW index supports at most 2000 dimensions. Above
-that (e.g. 2560), the schema file skips HNSW and retrieval uses a
-sequential scan — correct, just slower; fine at typical store sizes.
+Note: pgvector's HNSW caps the full-precision `vector` type at 2000
+dims, but the schema indexes the half-precision `embedding_hv` mirror
+instead, whose HNSW cap is 4000 dims — so the reference 2560 (and any
+width up to 4000) gets a real HNSW index. Only above 4000 does retrieval
+fall back to a sequential scan (correct, just slower; fine at typical
+store sizes).

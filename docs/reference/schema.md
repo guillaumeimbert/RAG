@@ -22,7 +22,8 @@ One row per text chunk of one filing. Written by the ingest pipeline
 | `section` | `TEXT NULL` | Heading path within the document |
 | `chunk_index` | `INT NOT NULL` | Position of the chunk within the document |
 | `text` | `TEXT NOT NULL` | Chunk text |
-| `embedding` | `vector(N) NOT NULL` | `N` = `EMBEDDING_DIM` (2560 in the reference schema) |
+| `embedding` | `vector(N) NOT NULL` | `N` = `EMBEDDING_DIM` (2560 in the reference schema); full precision, used for the exact rerank |
+| `embedding_hv` | `halfvec(N) GENERATED ALWAYS AS (embedding::halfvec) STORED` | Half-precision mirror of `embedding`, created for the HNSW index (below) |
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |
 
 Constraints/indexes: `UNIQUE (doc_id, chunk_index)` (ingest
@@ -34,11 +35,23 @@ the other blanks, which a `btrim` (spaces-only) check would miss. The
 migration is corrective: it replaces an earlier space-only constraint and
 removes any whitespace-only rows the old one admitted, so it cannot fail on
 pre-existing data);
-`chunks_embedding_hnsw` on `embedding`
-(`vector_cosine_ops`) — created only when `N ≤ 2000` (pgvector
-HNSW limit), otherwise retrieval falls back to sequential scan;
+`chunks_embedding_hnsw` on `embedding_hv`
+(`halfvec_cosine_ops`) — cosine HNSW over the half-precision mirror. pgvector's
+HNSW caps `vector` at 2000 dims but `halfvec` at 4000, so at the reference 2560
+dims only the mirror is indexable; the index is created when `N ≤ 4000`
+(`0004_halfvec_hnsw.sql` adds the mirror and index to existing databases)
+otherwise retrieval falls back to sequential scan. Search retrieves its
+candidates through this index (`ORDER BY embedding_hv <=> q`) and then reranks
+them with the full-precision `embedding` (ordering the candidates by that exact
+similarity), so the half-precision index never degrades result quality;
 B-tree indexes on `doc_id`, `(company, form)`, `(cik, filed_at DESC)`
 for metadata filters.
+
+A self-contained benchmark (`benchmark/halfvec_hnsw.sql`, rolled back
+on exit) measures the two retrieval strategies at the reference 2560
+dims: with the HNSW index the nearest-neighbour query is ~0.2 ms, while
+a sequential scan over the same 10,000 synthetic vectors takes ~20 ms
+(~100×); the gap widens as the store grows.
 
 ## `ownership_events` — 13G / 13D
 

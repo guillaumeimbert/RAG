@@ -82,6 +82,13 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
 - **similarity threshold** (`MIN_SIMILARITY`): an unrelated query above
   the floor returns **no** results (the path `ask` takes to avoid feeding
   the LLM irrelevant material), while a relevant query still passes,
+- **half-precision vector index**: the `chunks` table stores a halfvec
+  `embedding_hv` mirror of the full-precision `embedding`, and the HNSW
+  index is built on the mirror (pgvector caps `vector` HNSW at 2000 dims but
+  `halfvec` at 4000, so the reference 2560 is indexable); the test confirms
+  the mirror column and index exist, that candidate retrieval is an Index
+  Scan on the mirror, and that `0004_halfvec_hnsw.sql` adds the mirror +
+  index to an old-style database,
 - **structured retrieval** (latest-event-per-filer selection,
   previous-event deltas, multiple filers, amendment flag),
 - **chunk quality / data integrity** (every stored chunk is nonempty,
@@ -105,6 +112,11 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   the 13F's positions are stored (the information table is resolved from
   the index-named `infotable.xml`, not an assumed file name), while a
   non-allow-listed Form 4 in the same master file is pre-filtered out),
+- **malformed 13F information table**: a 13F whose information table
+  downloads fine but is well-formed XML with no `infoTable` rows (truncated
+  or schema-invalid) is classified as `Failed`, not `Skipped` — a table that
+  parses to zero positions is not treated as an empty holdings list (a
+  genuine 13F discloses at least one holding),
 - **CLI exit codes** (via the built binary, when `RAG_E2E_INGEST_BIN`
   is set).
 
@@ -114,8 +126,8 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   the *i*-th hit must carry citation `[i+1]` in both the excerpts block
   given to the LLM and the Sources block printed after its answer, so the
   model's `[n]` markers resolve to the right filing.
-- The e2e test applies the schema files itself, in order (`0001`, `0002`,
-  and `0003_chunk_quality.sql`). If you add `schema/0004_*.sql`, add it to
+- The e2e test applies the schema files itself, in order (`0001` through
+  `0004_halfvec_hnsw.sql`). If you add `schema/0005_*.sql`, add it to
   `test/e2e.ml`'s apply list too.
 - Fault injection makes 429/5xx retry loops finish instantly
   (`Net.set_backoff_scale 0.0` in the test), so a run that would
