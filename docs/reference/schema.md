@@ -116,8 +116,8 @@ amendment re-files the full table under a new accession.
 | `value_usd` | `BIGINT NULL` | Position value in USD |
 | `shares` | `NUMERIC NULL` | |
 | `prnamt_type` | `TEXT NOT NULL DEFAULT ''` | `SH` / `PRN` / `UNIT` (the share-or-principal type, not put/call) |
-| `put_call` | `TEXT NOT NULL DEFAULT ''` | SEC `putCall` (`P` / `C`); `''` when absent |
-| `other_manager` | `TEXT NOT NULL DEFAULT ''` | SEC `otherManager` (`YES` when reported for another manager); `''` when absent |
+| `put_call` | `TEXT NOT NULL DEFAULT ''` | SEC `putCall` (`Put` / `Call`); `''` when absent |
+| `other_manager` | `TEXT NOT NULL DEFAULT ''` | SEC `otherManager` (e.g. `Yes`, or an identifier); non-empty when the position is reported for another manager, `''` when absent |
 | `discretion` | `TEXT NULL` | Investment discretion (`SOLE`, `SHARED`, …) |
 | `vote_sole` / `vote_shared` / `vote_none` | `NUMERIC NULL` | Voting authority shares |
 

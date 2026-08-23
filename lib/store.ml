@@ -495,10 +495,14 @@ let holders_q =
     record_out syntax_off]
 
 (** The institutional holders of [issuer] from the latest report of each
-    filer. A single 13F report can hold the issuer in several lots (separate
-    rows), so the rows of each (filer, report) are aggregated — the value and
-    share counts are summed — before the latest report per filer is picked.
-    Match by CIK when given, else by name. *)
+    filer. The latest report (accession) per filer is selected first —
+    regardless of issuer — so a filer that sold the issuer in its newest
+    report does not surface the older position as current; ties (an original
+    and an amendment filed the same day) are broken by accession so the two
+    filings are never combined. Within that report the rows for [issuer] are
+    then aggregated: the value and share counts are summed across lots, and
+    class / discretion report MIXED when the lots disagree. Match by CIK
+    when given, else by name. *)
 type position = {
   filer_cik : string;
   filer_name : string;
@@ -515,44 +519,47 @@ let positions_q =
   [%rapper
     get_many
     {sql|
-      WITH per_report AS (
-        SELECT
+      WITH latest_accession AS (
+        SELECT DISTINCT ON (filer_cik)
           filer_cik,
-          MAX(filer_name) AS filer_name,
-          period,
-          filed_at,
-          MAX(issuer_name) AS issuer_name,
-          MAX(class) AS class_name,
-          SUM(value_usd) AS value_usd,
-          SUM(shares) AS shares,
-          MAX(discretion) AS discretion,
-          MAX(accession) AS accession
+          filer_name,
+          accession,
+          period
         FROM holdings
-        WHERE (%string{issuer_cik} <> '' AND issuer_cik = %string{issuer_cik})
-           OR (%string{issuer_cik} = '' AND issuer_name ILIKE %string{issuer_name})
-        GROUP BY filer_cik, period, filed_at
+        ORDER BY filer_cik, period DESC, filed_at DESC, accession DESC
       ),
-      latest AS (
+      per_accession AS (
         SELECT
-          per_report.*,
-          ROW_NUMBER() OVER (
-            PARTITION BY filer_cik ORDER BY period DESC, filed_at DESC
-          ) AS rn
-        FROM per_report
+          h.filer_cik,
+          la.filer_name,
+          la.period::text AS period,
+          h.accession,
+          MAX(h.issuer_name) AS issuer_name,
+          (CASE WHEN COUNT(DISTINCT NULLIF(h.class, '')) > 1 THEN 'MIXED'
+                ELSE MAX(h.class) END) AS class_name,
+          SUM(h.value_usd) AS value_usd,
+          SUM(h.shares) AS shares,
+          (CASE WHEN COUNT(DISTINCT NULLIF(h.discretion, '')) > 1 THEN 'MIXED'
+                ELSE MAX(h.discretion) END) AS discretion
+        FROM holdings h
+        JOIN latest_accession la
+          ON la.filer_cik = h.filer_cik AND la.accession = h.accession
+        WHERE (%string{issuer_cik} <> '' AND h.issuer_cik = %string{issuer_cik})
+           OR (%string{issuer_cik} = '' AND h.issuer_name ILIKE %string{issuer_name})
+        GROUP BY h.filer_cik, la.filer_name, la.period, h.accession
       )
       SELECT
-        l.filer_cik AS @string{filer_cik},
-        COALESCE(l.filer_name, '') AS @string{filer_name},
-        l.period::text AS @string{period},
-        l.issuer_name AS @string{issuer_name},
-        COALESCE(l.class_name, '') AS @string{class_name},
-        COALESCE(l.value_usd::float8, -1) AS @float{value_usd},
-        COALESCE(l.shares::float8, -1) AS @float{shares},
-        COALESCE(l.discretion, '') AS @string{discretion},
-        l.accession AS @string{accession}
-      FROM latest l
-      WHERE l.rn = 1
-      ORDER BY l.value_usd DESC NULLS LAST
+        pa.filer_cik AS @string{filer_cik},
+        COALESCE(pa.filer_name, '') AS @string{filer_name},
+        pa.period AS @string{period},
+        pa.issuer_name AS @string{issuer_name},
+        COALESCE(pa.class_name, '') AS @string{class_name},
+        COALESCE(pa.value_usd::float8, -1) AS @float{value_usd},
+        COALESCE(pa.shares::float8, -1) AS @float{shares},
+        COALESCE(pa.discretion, '') AS @string{discretion},
+        pa.accession AS @string{accession}
+      FROM per_accession pa
+      ORDER BY pa.value_usd DESC NULLS LAST
       LIMIT %int{limit}
     |sql}
     record_out syntax_off]

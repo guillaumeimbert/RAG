@@ -151,7 +151,7 @@ RAG_E2E_INGEST_BIN="$PWD/_build/default/bin/ingest.exe" \
   (which tracks the candidate set) at 1000, so a larger `top_k` could not be
   served. The pure `version_at_least` comparator is unit-tested too.
 - The e2e test applies the schema files itself, in order (`0001` through
-  `0004_halfvec_hnsw.sql`). If you add `schema/0005_*.sql`, add it to
+  `0006_event_index.sql`). If you add `schema/0007_*.sql`, add it to
   `test/e2e.ml`'s apply list too.
 - Fault injection makes 429/5xx retry loops finish instantly
   (`Net.set_backoff_scale 0.0` in the test), so a run that would

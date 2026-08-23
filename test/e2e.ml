@@ -364,6 +364,37 @@ let () =
       pg_exec scratch_db schema4;
       pg_exec scratch_db schema5;
       pg_exec scratch_db schema6;
+      (* 0a. migration idempotency: re-applying 0005/0006 is a no-op — a second
+         execution must not error, and must leave the already-correct keys
+         untouched (no lock, no reindex). *)
+      pg_exec scratch_db schema5;
+      pg_exec scratch_db schema6;
+      let holdings_pk_cols =
+        (match
+           pg_query scratch_db
+             ("SELECT array_agg(a.attname::text ORDER BY k.ord) FROM pg_constraint c "
+              ^ "CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) "
+              ^ "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum "
+              ^ "WHERE c.conrelid = 'holdings'::regclass AND c.contype = 'p'")
+         with
+         | [ [v] ] -> v
+         | _ -> "")
+      in
+      check "migration 0005 idempotent: holdings PK is (accession, position_index) after a second run"
+        (holdings_pk_cols = "{accession,position_index}");
+      let own_events_uk_cols =
+        (match
+           pg_query scratch_db
+             ("SELECT array_agg(a.attname::text ORDER BY k.ord) FROM pg_constraint c "
+              ^ "CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) "
+              ^ "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum "
+              ^ "WHERE c.conname = 'ownership_events_accession_event_index_key'")
+         with
+         | [ [v] ] -> v
+         | _ -> "")
+      in
+      check "migration 0006 idempotent: ownership_events UK is (accession, event_index) after a second run"
+        (own_events_uk_cols = "{accession,event_index}");
       Printf.printf "e2e: scratch database %s ready\n%!" scratch_db;
 
       (* pgvector >= 0.8.0 is required: the filtered-search path relies on the
@@ -673,6 +704,104 @@ let () =
         ( List.length pos = 1
         && (match List.hd pos with
              | p -> p.Store.filer_cik = "0001045810" && p.Store.issuer_name = "NEBIUS GROUP N.V.") );
+
+      (* 4b-extra. holdings query semantics under the row-ordinal key. A
+         single 13F can legitimately list the same (cusip, class, SH) more
+         than once (separate lots / managers / put-call splits); the
+         retrieval query must (i) sum the lots, (ii) report MIXED when class
+         or discretion disagree across the lots, and (iii) select each
+         filer's latest accession *before* filtering by issuer — a filer
+         that sold the issuer in its newest report is not surfaced as a
+         current holder. Rows use private filers (9999999998/9999999999) so
+         the fixture's NVIDIA holdings are undisturbed. *)
+      let hrow (acc : string) (pi : int) (period : string) (filed_at : string)
+        (issuer : string) (cusip : string) (cls : string) (discr : string)
+        (value : int option) (shares : int option) : Store.holding_row =
+        { accession = acc
+        ; position_index = pi
+        ; filer_cik = "9999999998"
+        ; filer_name = "PRIVATE FUND"
+        ; period
+        ; filed_at
+        ; issuer_name = issuer
+        ; issuer_cusip = cusip
+        ; issuer_cik = ""
+        ; class_name = cls
+        ; value_usd = value
+        ; shares
+        ; prnamt_type = "SH"
+        ; put_call = ""
+        ; other_manager = ""
+        ; discretion = discr
+        ; vote_sole = None
+        ; vote_shared = None
+        ; vote_none = None }
+      in
+      let hrow9 (acc : string) (pi : int) (period : string) (filed_at : string)
+        (issuer : string) (cusip : string) (cls : string) (discr : string)
+        (value : int option) (shares : int option) : Store.holding_row =
+        { (hrow acc pi period filed_at issuer cusip cls discr value shares)
+          with filer_cik = "9999999999" }
+      in
+      let holdings_count acc =
+        (match
+           pg_query scratch_db
+             ("SELECT count(*)::int FROM holdings WHERE accession = '" ^ acc ^ "';")
+         with
+         | [ [x] ] -> int_of_string x
+         | _ -> -1)
+      in
+      (* (i) two lots, same (cusip, class, SH), distinct ordinals -> summed *)
+      let sum_acc = "9998-0001" in
+      Lwt_main.run
+        (Store.upsert_holdings store sum_acc
+           [ hrow sum_acc 0 "2026-03-31" "2026-05-15" "SUM TEST ISSUER" "000000001" "COM" "SOLE" (Some 100) (Some 10)
+           ; hrow sum_acc 1 "2026-03-31" "2026-05-15" "SUM TEST ISSUER" "000000001" "COM" "SOLE" (Some 250) (Some 25) ]);
+      let pos_sum =
+        Lwt_main.run
+          (Store.positions_of store ~issuer_cik:"" ~issuer_name:"SUM TEST ISSUER" ~limit:10)
+      in
+      check "holdings: two lots with the same (cusip, class, SH) are summed"
+        ( List.length pos_sum = 1
+        && (match List.hd pos_sum with
+             | p -> p.Store.value_usd = 350.0 && p.Store.shares = 35.0
+                   && p.Store.class_name = "COM" && p.Store.discretion = "SOLE") );
+      (* (iii) the filer's LATEST accession no longer holds SOLD TEST -> the
+          older lot is stale and not surfaced as a current position *)
+      let sold_acc = "9999-0001" in
+      Lwt_main.run
+        (Store.upsert_holdings store sold_acc
+           [ hrow9 sold_acc 0 "2026-03-31" "2026-05-15" "SOLD TEST ISSUER" "000000003" "COM" "SOLE" (Some 400) (Some 40) ]);
+      (* (ii) the same filer's newer accession holds MIXED TEST in two lots
+          whose class and discretion disagree -> MIXED *)
+      let mix_acc = "9999-0002" in
+      Lwt_main.run
+        (Store.upsert_holdings store mix_acc
+           [ hrow9 mix_acc 0 "2026-06-30" "2026-08-14" "MIXED TEST ISSUER" "000000002" "COM" "SOLE" (Some 200) (Some 20)
+           ; hrow9 mix_acc 1 "2026-06-30" "2026-08-14" "MIXED TEST ISSUER" "000000002" "PREFERRED" "SHARED" (Some 300) (Some 30) ]);
+      let pos_sold =
+        Lwt_main.run
+          (Store.positions_of store ~issuer_cik:"" ~issuer_name:"SOLD TEST ISSUER" ~limit:10)
+      in
+      check "holdings: a filer that sold the issuer in its newest report is not current"
+        (List.length pos_sold = 0);
+      let pos_mix =
+        Lwt_main.run
+          (Store.positions_of store ~issuer_cik:"" ~issuer_name:"MIXED TEST ISSUER" ~limit:10)
+      in
+      check "holdings: class / discretion report MIXED when the lots disagree"
+        ( List.length pos_mix = 1
+        && (match List.hd pos_mix with
+             | p -> p.Store.class_name = "MIXED" && p.Store.discretion = "MIXED"
+                   && p.Store.value_usd = 500.0 && p.Store.shares = 50.0) );
+      (* (iv) a forced re-ingest of the same accession replaces the rows
+          (no duplicate, no "cannot affect row a second time") *)
+      Lwt_main.run
+        (Store.upsert_holdings ~force:true store mix_acc
+           [ hrow9 mix_acc 0 "2026-06-30" "2026-08-14" "MIXED TEST ISSUER" "000000002" "COM" "SOLE" (Some 200) (Some 20)
+           ; hrow9 mix_acc 1 "2026-06-30" "2026-08-14" "MIXED TEST ISSUER" "000000002" "PREFERRED" "SHARED" (Some 300) (Some 30) ]);
+      check "holdings: a forced re-ingest of the same accession is a replace, not a duplicate"
+        (holdings_count mix_acc = 2);
 
       (* 4c. semantic retrieval relevance: the store must rank by ACTUAL
          cosine similarity, not merely return rows. Insert three chunks with

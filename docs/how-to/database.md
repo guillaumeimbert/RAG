@@ -66,6 +66,30 @@ podman compose exec -T db psql -U raguesslighter -d raguesslighter \
   < schema/0004_halfvec_hnsw.sql
 ```
 
+`0005_position_index.sql` and `0006_event_index.sql` likewise converge on
+an existing store: they add the row-ordinal columns, back-fill a
+deterministic ordinal for pre-existing rows, and swap the holdings /
+ownership-events keys to the row-ordinal form (a no-op once applied):
+
+```sh
+podman compose exec -T db psql -U raguesslighter -d raguesslighter \
+  < schema/0005_position_index.sql
+podman compose exec -T db psql -U raguesslighter -d raguesslighter \
+  < schema/0006_event_index.sql
+```
+
+The back-fill writes a *synthetic* per-accession ordinal — enough to make
+the new key valid, but not the true XML row ordinal. If any holdings rows
+were previously collapsed by the old content-based key (the ingest
+previously de-duplicated duplicate `(accession, cusip, class, prnamt_type)`
+rows), the migration cannot recover the discarded rows; force-reingest the
+affected date to rewrite them with the true ordinals and the SEC
+`putCall` / `otherManager` fields:
+
+```sh
+dune exec bin/ingest.exe day --date YYYY-MM-DD --force
+```
+
 When the index is (re)built on a large store, pgvector builds the HNSW graph
 in shared memory. Two separate settings govern this:
 - `maintenance_work_mem` (Postgres GUC, default 64 MB) is the build budget.
@@ -94,10 +118,13 @@ Dropping the tables keeps the database; re-ingest to repopulate:
 DROP TABLE IF EXISTS chunks CASCADE;
 DROP TABLE IF EXISTS ownership_events CASCADE;
 DROP TABLE IF EXISTS holdings CASCADE;
--- then re-run the schema files:
+-- then re-run the schema files, in order:
 \i /docker-entrypoint-initdb.d/0001_init.sql
 \i /docker-entrypoint-initdb.d/0002_ownership.sql
 \i /docker-entrypoint-initdb.d/0003_chunk_quality.sql
+\i /docker-entrypoint-initdb.d/0004_halfvec_hnsw.sql
+\i /docker-entrypoint-initdb.d/0005_position_index.sql
+\i /docker-entrypoint-initdb.d/0006_event_index.sql
 ```
 
 Or nuke everything including the volume (destructive):

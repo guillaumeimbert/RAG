@@ -11,15 +11,20 @@
 -- (accession, event_index), where event_index is the 0-based event ordinal.
 --
 -- Idempotent and safe on both a fresh (post-0001) database and a database
--- holding rows written under the old key:
+-- holding rows written under the old key. Each step is a no-op when it has
+-- already been applied, so re-running never locks or reindexes a table that
+-- is already correct:
 --   * adds event_index if absent;
 --   * back-fills a deterministic per-accession ordinal for any pre-existing
 --     rows;
---   * swaps the UNIQUE constraint to (accession, event_index).
+--   * drops the specific legacy UNIQUE constraint
+--     (accession, filer_cik, subject_cik, class) only when it is present,
+--     and adds (accession, event_index) only when it is not already present.
 DO $$
 DECLARE
     has_event_index boolean;
-    ukey_name text;
+    legacy_ukey text;
+    new_ukey text;
 BEGIN
     SELECT EXISTS (
         SELECT 1 FROM pg_attribute
@@ -49,22 +54,47 @@ BEGIN
          WHERE e.ctid = x.ctid;
     END IF;
 
-    -- Swap the UNIQUE constraint to (accession, event_index), idempotently:
-    -- drop the current UNIQUE constraint (whatever it is named) and re-add
-    -- the new one. The re-add is a no-op when the constraint is already the
-    -- new one.
-    SELECT conname INTO ukey_name
-      FROM pg_constraint
-     WHERE conrelid = 'ownership_events'::regclass AND contype = 'u'
-     LIMIT 1;
-    IF ukey_name IS NOT NULL THEN
-        EXECUTE format('ALTER TABLE ownership_events DROP CONSTRAINT %I', ukey_name);
-        RAISE NOTICE '0006_event_index: dropped unique constraint %', ukey_name;
+    -- Drop the specific legacy UNIQUE constraint
+    -- (accession, filer_cik, subject_cik, class), only if it is present.
+    -- Targeting the constraint by its columns (not "any unique constraint")
+    -- keeps this safe if other UNIQUE constraints exist on the table.
+    SELECT conname INTO legacy_ukey
+      FROM pg_constraint c
+     WHERE c.conrelid = 'ownership_events'::regclass AND c.contype = 'u'
+       AND (SELECT array_agg(a.attname::text ORDER BY k.ord)
+              FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+              JOIN pg_attribute a
+                ON a.attrelid = c.conrelid AND a.attnum = k.attnum)
+            = ARRAY['accession', 'filer_cik', 'subject_cik', 'class'];
+    IF legacy_ukey IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE ownership_events DROP CONSTRAINT %I', legacy_ukey);
+        RAISE NOTICE '0006_event_index: dropped legacy unique constraint %', legacy_ukey;
     END IF;
-    ALTER TABLE ownership_events ADD CONSTRAINT ownership_events_accession_event_index_key
-        UNIQUE (accession, event_index);
-    -- The default is only for the ADD COLUMN back-fill; drop it so future
-    -- inserts must carry an explicit ordinal.
-    ALTER TABLE ownership_events ALTER COLUMN event_index DROP DEFAULT;
-    RAISE NOTICE '0006_event_index: unique constraint is now (accession, event_index)';
+
+    -- Add the new UNIQUE constraint (accession, event_index), only if it is
+    -- not already present.
+    SELECT conname INTO new_ukey
+      FROM pg_constraint c
+     WHERE c.conrelid = 'ownership_events'::regclass AND c.contype = 'u'
+       AND (SELECT array_agg(a.attname::text ORDER BY k.ord)
+              FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+              JOIN pg_attribute a
+                ON a.attrelid = c.conrelid AND a.attnum = k.attnum)
+            = ARRAY['accession', 'event_index'];
+    IF new_ukey IS NULL THEN
+        ALTER TABLE ownership_events ADD CONSTRAINT ownership_events_accession_event_index_key
+            UNIQUE (accession, event_index);
+        RAISE NOTICE '0006_event_index: unique constraint is now (accession, event_index)';
+    END IF;
+
+    -- The NOT NULL DEFAULT was only for the ADD COLUMN back-fill; drop it so
+    -- future inserts must carry an explicit ordinal. Guarded so a re-run is
+    -- a no-op once the default is gone.
+    IF EXISTS (
+        SELECT 1 FROM pg_attribute
+         WHERE attrelid = 'ownership_events'::regclass AND attname = 'event_index'
+           AND atthasdef
+    ) THEN
+        ALTER TABLE ownership_events ALTER COLUMN event_index DROP DEFAULT;
+    END IF;
 END $$;

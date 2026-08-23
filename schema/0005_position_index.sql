@@ -14,17 +14,22 @@
 -- captured (they were not parsed before).
 --
 -- Idempotent and safe on both a fresh (post-0001) database and a database
--- holding rows written under the old key:
+-- holding rows written under the old key. Each step is a no-op when it has
+-- already been applied, so re-running never locks or reindexes a table that
+-- is already correct:
 --   * adds position_index / put_call / other_manager if absent;
 --   * back-fills a deterministic per-accession ordinal for any pre-existing
 --     rows (rows written under the old key carry no meaningful ordinal; a
 --     unique one is enough for the new key to be valid — a forced re-ingest
 --     rewrites them with the true XML row ordinal);
---   * swaps the primary key to (accession, position_index).
+--   * swaps the primary key to (accession, position_index) only when it is
+--     not already that key.
 DO $$
 DECLARE
     has_position_index boolean;
     pkey_name text;
+    pk_cols text[];
+    desired_pk text[] := ARRAY['accession', 'position_index'];
 BEGIN
     SELECT EXISTS (
         SELECT 1 FROM pg_attribute
@@ -56,20 +61,36 @@ BEGIN
          WHERE h.ctid = x.ctid;
     END IF;
 
-    -- Swap the primary key to (accession, position_index), idempotently:
-    -- drop the current primary key (whatever it is named) and re-add the
-    -- new one. The re-add is a no-op when the key is already the new one.
+    -- Inspect the current primary key columns and only swap the key when it
+    -- is not already (accession, position_index). A re-run is then a no-op
+    -- (no lock, no reindex).
     SELECT conname INTO pkey_name
       FROM pg_constraint
-     WHERE conrelid = 'holdings'::regclass AND contype = 'p'
-     LIMIT 1;
-    IF pkey_name IS NOT NULL THEN
-        EXECUTE format('ALTER TABLE holdings DROP CONSTRAINT %I', pkey_name);
-        RAISE NOTICE '0005_position_index: dropped primary key %', pkey_name;
+     WHERE conrelid = 'holdings'::regclass AND contype = 'p';
+    SELECT coalesce(array_agg(a.attname::text ORDER BY k.ord), ARRAY[]::text[])
+      INTO pk_cols
+      FROM pg_constraint c
+      CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+     WHERE c.conrelid = 'holdings'::regclass AND c.contype = 'p';
+
+    IF pk_cols <> desired_pk THEN
+        IF pkey_name IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE holdings DROP CONSTRAINT %I', pkey_name);
+            RAISE NOTICE '0005_position_index: dropped primary key %', pkey_name;
+        END IF;
+        ALTER TABLE holdings ADD PRIMARY KEY (accession, position_index);
+        RAISE NOTICE '0005_position_index: primary key is now (accession, position_index)';
     END IF;
-    ALTER TABLE holdings ADD PRIMARY KEY (accession, position_index);
-    -- The default is only for the ADD COLUMN back-fill; drop it so future
-    -- inserts must carry an explicit ordinal.
-    ALTER TABLE holdings ALTER COLUMN position_index DROP DEFAULT;
-    RAISE NOTICE '0005_position_index: primary key is now (accession, position_index)';
+
+    -- The NOT NULL DEFAULT was only for the ADD COLUMN back-fill; drop it so
+    -- future inserts must carry an explicit ordinal. Guarded so a re-run is
+    -- a no-op once the default is gone.
+    IF EXISTS (
+        SELECT 1 FROM pg_attribute
+         WHERE attrelid = 'holdings'::regclass AND attname = 'position_index'
+           AND atthasdef
+    ) THEN
+        ALTER TABLE holdings ALTER COLUMN position_index DROP DEFAULT;
+    END IF;
 END $$;

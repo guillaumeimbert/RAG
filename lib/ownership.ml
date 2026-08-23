@@ -442,10 +442,10 @@ type position = {
   prnamt_type : string;
   (** SH / PRN / UNIT — the share-or-principal type (not put/call) *)
   put_call : string;
-  (** SEC [putCall] (P / C); "" when the element is absent *)
+  (** SEC [putCall] ("Put" / "Call"); "" when the element is absent *)
   other_manager : string;
-  (** SEC [otherManager] ("YES" when the position is reported on behalf of
-      another manager); "" when absent *)
+  (** SEC [otherManager] (e.g. "Yes", or an identifier); non-empty when the
+      position is reported on behalf of another manager; "" when absent *)
   discretion : string;
   vote_sole : int option;
   vote_shared : int option;
